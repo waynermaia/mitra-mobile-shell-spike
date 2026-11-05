@@ -81,6 +81,11 @@ day (id 6831288469). Two things only the run could teach:
   be built with the iOS 26 SDK or later"). GitHub `macos-15` runners default to Xcode 16.4;
   `macos-26` defaults to Xcode 26.6 and worked.
 
+- After processing, TestFlight asked the "App Encryption Documentation" question before the
+  build could be tested. For a shell that only uses HTTPS from the OS the answer is "None of
+  the algorithms mentioned above"; `ITSAppUsesNonExemptEncryption = false` in `Info.plist`
+  (added after build 10) answers it at upload time, so the pipeline never needs a human there.
+
 The steps below stay as the recipe for the next app.
 
 1. Apple Developer Program membership (USD 99/year) on the account that owns the app. For a
