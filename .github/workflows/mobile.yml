@@ -54,6 +54,9 @@ jobs:
   ios-simulator:
     name: iOS compile check (simulator, unsigned)
     runs-on: macos-15
+    defaults:
+      run:
+        shell: bash
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -74,6 +77,9 @@ jobs:
     name: iOS archive and upload to TestFlight
     if: ${{ github.event_name == 'workflow_dispatch' && inputs.upload_testflight }}
     runs-on: macos-15
+    defaults:
+      run:
+        shell: bash
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
