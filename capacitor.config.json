@@ -1,0 +1,27 @@
+{
+  "appId": "cloud.infusion.bolomobilespike",
+  "appName": "Bolo Mobile Spike",
+  "webDir": "www",
+  "server": {
+    "url": "https://REPLACE-ME.infusion.cloud",
+    "cleartext": false
+  },
+  "ios": {
+    "contentInset": "automatic"
+  },
+  "android": {
+    "allowMixedContent": false
+  },
+  "plugins": {
+    "SplashScreen": {
+      "launchShowDuration": 1500,
+      "launchAutoHide": true,
+      "backgroundColor": "#0f172a",
+      "showSpinner": false
+    },
+    "StatusBar": {
+      "style": "DARK",
+      "backgroundColor": "#0f172a"
+    }
+  }
+}
