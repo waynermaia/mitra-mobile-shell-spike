@@ -10,7 +10,8 @@
     "contentInset": "automatic"
   },
   "android": {
-    "allowMixedContent": false
+    "allowMixedContent": false,
+    "webContentsDebuggingEnabled": true
   },
   "plugins": {
     "SplashScreen": {

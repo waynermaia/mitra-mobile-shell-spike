@@ -18,6 +18,15 @@
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
+            <!-- App Link for the published app domain: the sign-in started in the system
+                 browser ends on this host and Android hands the URL back to the shell.
+                 Production needs /.well-known/assetlinks.json served by that host. -->
+            <intent-filter android:autoVerify="true">
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+                <data android:scheme="https" android:host="a1-a17htrxztqy0pw4apmihj62ou.infusion-ai.cloud" />
+            </intent-filter>
         </activity>
 
         <provider
