@@ -4,7 +4,7 @@ Spike (2026-11-05): wrap an app published by Infusion in a Capacitor shell and t
 internal testing (Google Play) and TestFlight (Apple). Companion note:
 `vault/20-projects/superficie-apps-stores/spike-apps-nas-stores-2026-11-05.md`.
 
-Target app: **Bolo Mobile Spike**, created in Infusion for this test. Published URL lives in
+Target app: **Bolo Mobile Spike**, created in Infusion for this test. Published URL (https://a1-a17htrxztqy0pw4apmihj62ou.infusion-ai.cloud) lives in
 `capacitor.config.json` (`server.url`).
 
 ## What is here

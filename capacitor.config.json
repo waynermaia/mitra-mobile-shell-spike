@@ -3,7 +3,7 @@
   "appName": "Bolo Mobile Spike",
   "webDir": "www",
   "server": {
-    "url": "https://REPLACE-ME.infusion.cloud",
+    "url": "https://a1-a17htrxztqy0pw4apmihj62ou.infusion-ai.cloud",
     "cleartext": false
   },
   "ios": {
