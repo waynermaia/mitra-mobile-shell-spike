@@ -66,13 +66,28 @@ The upload keystore for this spike is in `.secrets/upload-spike.jks` (git-ignore
 repo secrets `ANDROID_KEYSTORE_B64`, `KEYSTORE_PASSWORD`, `KEY_ALIAS`, `KEY_PASSWORD`. Play App
 Signing lets Google hold the final key, so this upload key can be reset later.
 
-### Apple (TestFlight)
+### Apple (TestFlight): DONE on 2026-11-05
+
+Build 1.0 (run 42092822789) uploaded to App Store Connect for the app record created that
+day (id 6831288469). Two things only the run could teach:
+
+- An API key with the **App Manager** role archives fine but `-exportArchive` fails with
+  "Cloud signing permission error" / "No signing certificate iOS Distribution found": only
+  an **Admin** key may create the cloud-managed distribution certificate, and there is no UI
+  option to grant that to an App Manager key. The alternative for a platform that must not
+  ask customers for an Admin key is to create the distribution certificate (CSR) and the
+  profile through the API and sign with them instead of cloud signing.
+- App Store Connect rejects builds made with the iOS 18 SDK ("All iOS and iPadOS apps must
+  be built with the iOS 26 SDK or later"). GitHub `macos-15` runners default to Xcode 16.4;
+  `macos-26` defaults to Xcode 26.6 and worked.
+
+The steps below stay as the recipe for the next app.
 
 1. Apple Developer Program membership (USD 99/year) on the account that owns the app. For a
    company, enrollment needs a D-U-N-S number and can take days.
 2. App Store Connect -> Users and Access -> Integrations -> App Store Connect API -> generate a
-   **Team** key with role **App Manager**. Note the Key ID and the Issuer ID and download the
-   `.p8` once (it cannot be downloaded again).
+   **Team** key with role **Admin** (App Manager is not enough for cloud signing, see above).
+   Note the Key ID and the Issuer ID and download the `.p8` once (it cannot be downloaded again).
 3. App Store Connect -> Apps -> `+` -> New App: platform iOS, name "Bolo Mobile Spike", bundle
    ID `cloud.infusion.bolomobilespike` (register it under Certificates, Identifiers and
    Profiles if it is not listed), SKU `bolo-mobile-spike`. Creating the app record is not
