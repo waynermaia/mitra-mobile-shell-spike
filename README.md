@@ -77,6 +77,41 @@ Signing lets Google hold the final key, so this upload key can be reset later.
 6. Before a real App Store submission: Sign in with Apple if the app offers Google login,
    privacy policy URL, and native features beyond the WebView (guideline 4.2).
 
+## Social sign-in inside the shell (proved on the emulator, 2026-11-05)
+
+A plain WebView cannot finish Google sign-in: Capacitor sends any host outside `server.url`
+to the system browser, and in popup mode the web app waits for a popup answer that never
+arrives. What works, end to end on a Pixel 7 emulator (API 35):
+
+1. The web app calls `signInWithGoogle({ mode: 'redirect' })` when `window.Capacitor` exists
+   (the Bolo app does this since its second publish). The SDK stores the CSRF context in the
+   WebView's `sessionStorage` and navigates to the auth page; Capacitor opens that in Chrome.
+2. Chrome runs the auth page and Google, then the auth page redirects to the app origin with
+   `#codeMitra=...&stateMitra=...`.
+3. The manifest declares an App Link (`autoVerify`) for the app host, so Android hands that
+   URL to the shell instead of Chrome. `MainActivity.onNewIntent` loads it in the WebView
+   with a fresh `shellLink` query value, which forces a full document load.
+4. The app boots, `completeGoogleSignInRedirect()` finds the fragment and the context,
+   exchanges the code at IAM, and the user is signed in.
+
+On the emulator the domain was approved by hand:
+
+```bash
+adb shell pm set-app-links --package cloud.infusion.bolomobilespike 2 <app host>
+adb shell pm set-app-links-user-selection --user 0 --package cloud.infusion.bolomobilespike true <app host>
+```
+
+Production needs the platform to serve `https://<app host>/.well-known/assetlinks.json`
+(package name + upload certificate SHA-256) and, for iOS, `apple-app-site-association`.
+
+WebView inspection: `webContentsDebuggingEnabled` is on in `capacitor.config.json`;
+`adb forward tcp:9333 localabstract:webview_devtools_remote_<pid>` exposes the DevTools
+protocol on `http://localhost:9333/json`.
+
+Emulator setup used here (no Android Studio): `sdkmanager emulator
+"system-images;android-35;google_apis;arm64-v8a"`, `avdmanager create avd -n spike35 -k ... -d pixel_7`,
+then `hw.keyboard=yes` in `~/.android/avd/spike35.avd/config.ini` so the Mac keyboard works.
+
 ## Findings to carry into the Proposal
 
 - Both stores require the content owner's own account; the platform can automate everything
