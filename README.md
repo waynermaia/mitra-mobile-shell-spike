@@ -127,5 +127,5 @@ then `hw.keyboard=yes` in `~/.android/avd/spike35.avd/config.ini` so the Mac key
   after an API key (Apple) and a service account (Google) are handed over.
 - The two manual steps that remain are "create the app record" (Apple) and "first upload"
   (Google).
-- iOS builds need macOS; GitHub Actions `macos-15` worked for this spike without any local
+- iOS builds need macOS; GitHub Actions `macos-26` worked for this spike without any local
   Xcode.
