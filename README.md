@@ -39,7 +39,16 @@ export `ANDROID_KEYSTORE_PATH=.secrets/upload-spike.jks`, then `cd android && ./
 
 ## Morning checklist: what only the account owner can do
 
-### Google Play (internal testing)
+### Google Play (internal testing): DONE on 2026-11-05
+
+Done through the organization account that already existed (it also hosts the Mitra and
+Infusion apps): app "Bolo Mobile Spike" created, the `android-release` AAB of run 42059892570
+published to the internal testing track, tester list created and opt-in link generated
+(`https://play.google.com/apps/internaltest/4699351945255650955`). Play App Signing was on by
+default, so the installed APK is signed by Google: production `assetlinks.json` must carry the
+Google signing certificate fingerprint shown under App signing in the console, not the upload
+key fingerprint (the upload key only matches APKs installed with `adb`). The steps below stay
+as the recipe for the next app.
 
 1. Have a Play Console developer account (USD 25 once). Organization accounts need a D-U-N-S
    number; personal accounts created after 2023-11-13 must run a closed test with 12 testers
