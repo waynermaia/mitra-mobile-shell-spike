@@ -215,9 +215,9 @@ const commands = {
   async builds({ "bundle-id": bundleId }) {
     need({ bundleId });
     const app = requireApp(await findApp(bundleId), bundleId);
-    const r = await api("GET", `/v1/builds?filter[app]=${app.id}&sort=-uploadedDate&limit=50&fields[builds]=version,processingState,uploadedDate,expired&include=preReleaseVersion&fields[preReleaseVersions]=version`);
+    const r = await api("GET", `/v1/builds?filter[app]=${app.id}&sort=-uploadedDate&limit=50&fields[builds]=version,processingState,uploadedDate,expired,usesNonExemptEncryption,betaGroups&include=preReleaseVersion&fields[preReleaseVersions]=version`);
     const trains = Object.fromEntries((r.included || []).map((i) => [i.id, i.attributes.version]));
-    const rows = r.data.map((b) => ({ build: b.attributes.version, train: trains[b.relationships?.preReleaseVersion?.data?.id] ?? null, state: b.attributes.processingState, expired: b.attributes.expired, uploaded: b.attributes.uploadedDate }));
+    const rows = r.data.map((b) => ({ build: b.attributes.version, train: trains[b.relationships?.preReleaseVersion?.data?.id] ?? null, state: b.attributes.processingState, expired: b.attributes.expired, uploaded: b.attributes.uploadedDate, encryption: b.attributes.usesNonExemptEncryption, groups: (b.relationships?.betaGroups?.data || []).length }));
     console.log(JSON.stringify(rows, null, 2));
   },
 
