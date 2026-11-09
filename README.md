@@ -55,30 +55,51 @@ number, optional `App.entitlements` with `applinks:<host>` wired through
 `out/last.json` and, under GitHub Actions, the same fields in `GITHUB_OUTPUT`.
 
 CI per app: `.github/workflows/shell.yml` (Actions -> App shell -> Run workflow) takes the app
-UUID (or a URL), the API base, an optional bundle id override, the marketing version and two
-switches: `associated_domains` and `upload_testflight`. The Android job builds the signed AAB
-and APK (artifact `android-<slug>`); the iOS job does an unsigned device build by default and,
-with `upload_testflight`, the cloud-signed archive and the upload (the bundle id and the app
-record must already exist in App Store Connect, see the checklist above). Runners come from the
+UUID (or a URL), the API base, an optional bundle id override, the marketing version, an optional
+build number, and the switches `associated_domains` (default on), `upload_testflight`,
+`upload_play`, plus the TestFlight group and the Play track. Both jobs first resolve the identity
+(`generate.mjs --identity`) and the build number (`asc.mjs next-build`: App Store Connect latest
+build + 1, so iOS and Android move together; the run number when the app has no record yet or
+`build_number` is given). The Android job builds the signed AAB and APK (artifact
+`android-<slug>`) and, when the `PLAY_SERVICE_ACCOUNT_JSON_B64` secret exists, uploads the AAB
+to the Play track with `play.mjs upload` (exit 3 = the app or its first AAB are missing in Play
+Console, reported as a warning). The iOS job does an unsigned device build by default and, with
+`upload_testflight`, registers the bundle id when missing (`asc.mjs ensure-bundle-id`), checks
+the app record (`asc.mjs app-id`, exit 3 with the manual step when missing), archives with
+cloud signing, uploads, waits for processing and adds the build to the TestFlight group
+(`asc.mjs wait-build` and `add-to-group`, group created when missing). Runners come from the
 repository variables `LINUX_RUNNER` and `MACOS_RUNNER` (defaults `ubuntu-latest` and
 `macos-26`), so moving to self-hosted machines is a variable change.
 
-Proved on 2026-11-08 on the Pixel 7 emulator: Bolo (`cloud.infusion.bolomobilespike`, icon from
-the inline SVG favicon) and Mitra Crew (`cloud.infusion.mitracrew`, icon from `icone.svg`,
-white theme) generated from their URLs only, both installed side by side with their own icon,
-name and URL; 16 to 25 s per app end to end on this Mac. Google sign-in on the generated Bolo
-shell finished in the app (Chrome, account picker, App Link back, task list rendered), with the
-host approved by `pm set-app-links` as in the spike.
+### iOS sign-in inside the shell (2026-11-09)
 
-CI proof on 2026-11-09 (workflow `App shell`): run 42598065986 for Bolo by app UUID with
-`upload_testflight` (Android signed, iOS archive with cloud signing, "Upload succeeded" to App
-Store Connect) and run 42598070056 for Mitra Crew by app UUID (Android signed, unsigned iOS
-device build with bundle id `cloud.mitra.mitracrew`); about 4 minutes each.
+`generator/templates/ios/SceneDelegate.swift` replaces the Capacitor one in every generated
+project. It does two things the published app cannot: a top-level navigation to an identity
+host (the platform API host, `accounts.google.com`, Microsoft, Apple; list in
+`capacitor.config.json` under `plugins.MitraShell.authHosts`, `--auth-hosts` adds more) opens in
+an `ASWebAuthenticationSession` whose callback is the app's own host (iOS 17.4+ `https`
+callback), and the URL the session returns, or a Universal Link, is loaded in the WebView with
+a fresh `shellLink` query value so the SDK completes the sign-in at boot, the same move as
+`MainActivity.onNewIntent` on Android. Safari alone would not do it: it does not turn the SDK's
+JavaScript redirect into a Universal Link. The `https` callback needs `webcredentials:<host>`
+next to `applinks:<host>` in `App.entitlements` (both written by `--associated-domains`) and the
+host serving the AASA file. Below 17.4, or when the session cannot start, the behavior is the
+old one (system browser).
 
-Not covered by the POC: store account steps stay manual as documented above (bundle id and app
-record for a new app), the build number is the workflow run number (a per-app counter is needed
-before two apps share real release trains), and the assetlinks / AASA files remain a platform
-change.
+### Association files the host must serve
+
+`generator/wellknown.mjs --project out/<slug> --team <Apple Team ID> --keystore ... --play-sha256 ...`
+writes `out/<slug>/wellknown/apple-app-site-association`, `assetlinks.json` and the
+KeyValueStore value the platform edge serves them from (key `mobile:<host>`; the platform change
+is `mitra-terraform` module `storage`, function `apps-wellknown.js` on a `/.well-known/*`
+behavior), and prints the `aws cloudfront-keyvaluestore put-key` command for the operator. The
+Android fingerprints are the upload key (APK by adb) and the Play App Signing key (store
+installs); both are listed for Bolo.
+
+Still manual, by design of the stores: the app record in App Store Connect (no public create-app
+endpoint), the app and its first AAB in Play Console, and the Play service account key
+(credential creation). Everything after those is the workflow.
+
 
 ## Local commands
 
