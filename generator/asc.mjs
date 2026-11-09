@@ -19,7 +19,7 @@
 // not exist in App Store Connect; the public API has no endpoint to create one).
 //
 // next-build prints only a number so the CI can capture it: the fallback (or 1) when the app has
-// no build yet or no app record, otherwise max(latest build number, fallback) + 1.
+// no build yet or no app record, otherwise max(highest build number ever, fallback) + 1.
 
 import { createPrivateKey, sign } from "node:crypto";
 import { readFileSync, writeFileSync, mkdtempSync } from "node:fs";
@@ -117,6 +117,14 @@ async function latestBuild(appId) {
   return r.data[0] || null;
 }
 
+// The highest build number the app ever had, whatever its upload date: a build uploaded later
+// with a lower number (a parallel train, a run-number fallback) must not pull the counter back.
+async function highestBuildNumber(appId) {
+  const r = await api("GET", `/v1/builds?filter[app]=${appId}&limit=200&fields[builds]=version`);
+  const numbers = r.data.map((b) => Number.parseInt(String(b.attributes.version), 10)).filter((n) => !Number.isNaN(n));
+  return numbers.length ? String(Math.max(...numbers)) : null;
+}
+
 async function buildByNumber(appId, build) {
   const r = await api("GET", `/v1/builds?filter[app]=${appId}&filter[version]=${encodeURIComponent(build)}&fields[builds]=version,processingState`);
   return r.data.find((b) => String(b.attributes.version) === String(build)) || null;
@@ -161,8 +169,7 @@ const commands = {
       console.log(nextBuildNumber(null, fallback));
       return;
     }
-    const latest = await latestBuild(app.id);
-    console.log(nextBuildNumber(latest ? latest.attributes.version : null, fallback));
+    console.log(nextBuildNumber(await highestBuildNumber(app.id), fallback));
   },
 
   async "wait-build"({ "bundle-id": bundleId, build, "timeout-minutes": timeoutMinutes }) {

@@ -58,8 +58,8 @@ CI per app: `.github/workflows/shell.yml` (Actions -> App shell -> Run workflow)
 UUID (or a URL), the API base, an optional bundle id override, the marketing version, an optional
 build number, and the switches `associated_domains` (default on), `upload_testflight`,
 `upload_play`, plus the TestFlight group and the Play track. Both jobs first resolve the identity
-(`generate.mjs --identity`) and the build number (`asc.mjs next-build`: App Store Connect latest
-build + 1, so iOS and Android move together; the run number when the app has no record yet or
+(`generate.mjs --identity`) and the build number (`asc.mjs next-build`: highest build number in App
+Store Connect + 1, so iOS and Android move together; the run number when the app has no record yet or
 `build_number` is given). The Android job builds the signed AAB and APK (artifact
 `android-<slug>`) and, when the `PLAY_SERVICE_ACCOUNT_JSON_B64` secret exists, uploads the AAB
 to the Play track with `play.mjs upload` (exit 3 = the app or its first AAB are missing in Play
