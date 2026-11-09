@@ -7,12 +7,15 @@ import Capacitor
 // know this shell exists, so the shell does the two native things sign-in needs:
 //
 //  1. A top-level navigation to an identity host (the platform API, Google, Microsoft) opens in
-//     an ASWebAuthenticationSession whose callback is the app's own host. Safari does not turn a
-//     JavaScript redirect into a Universal Link, but the session hands back any navigation to the
-//     callback host, fragment included, which is how the SDK returns (#codeMitra and #stateMitra).
-//  2. A URL that reaches the app by Universal Link, or back from the session, is loaded in the
-//     WebView with a fresh query value, so the SDK finishes the sign-in at boot. The CSRF context
-//     the SDK wrote to sessionStorage is still there because the WebView never navigated away.
+//     an ASWebAuthenticationSession. Its callback is either the shell's URL scheme
+//     (plugins.MitraShell.callbackScheme, the default: the app page bounces the SDK fragment,
+//     #codeMitra and #stateMitra, to <scheme>://auth, see app-snippet/) or the app's own host
+//     (Universal Link, which needs the apple-app-site-association file served there). Either way
+//     the session hands the URL back, fragment included.
+//  2. A URL that reaches the app by Universal Link, by its scheme, or back from the session, is
+//     loaded in the WebView as the app host with the same fragment and a fresh query value, so the
+//     SDK finishes the sign-in at boot. The CSRF context the SDK wrote to sessionStorage is still
+//     there because the WebView never navigated away.
 //
 // The identity hosts come from capacitor.config.json (plugins.MitraShell.authHosts). Anything
 // else off-host keeps Capacitor's default and opens in the system browser.
@@ -35,6 +38,10 @@ class SceneDelegate: UIResponder, UIWindowSceneDelegate {
 
     func scene(_ scene: UIScene, openURLContexts URLContexts: Set<UIOpenURLContext>) {
         SceneDelegateProxy.shared.scene(scene, openURLContexts: URLContexts)
+        // The fallback link of the app page, or any other tap on the scheme, outside the session.
+        for context in URLContexts {
+            handleShellReturn(context.url)
+        }
     }
 
     func scene(_ scene: UIScene, continue userActivity: NSUserActivity) {
@@ -46,6 +53,12 @@ class SceneDelegate: UIResponder, UIWindowSceneDelegate {
         guard activity.activityType == NSUserActivityTypeBrowsingWeb, let url = activity.webpageURL else { return }
         (window?.rootViewController as? ShellBridgeViewController)?.loadInShell(url)
     }
+
+    private func handleShellReturn(_ url: URL) {
+        guard let shell = window?.rootViewController as? ShellBridgeViewController,
+              let target = shell.appURL(fromReturn: url) else { return }
+        shell.loadInShell(target)
+    }
 }
 
 class ShellBridgeViewController: CAPBridgeViewController {
@@ -56,6 +69,26 @@ class ShellBridgeViewController: CAPBridgeViewController {
     // With server.url this is the published host; it is the only host the shell claims.
     var appHost: String? {
         return bridge?.config.serverURL.host?.lowercased()
+    }
+
+    // The URL scheme the sign-in comes back by, when the shell is not relying on the host.
+    var callbackScheme: String? {
+        guard let scheme = bridge?.config.getPluginConfig("MitraShell").getString("callbackScheme"),
+              !scheme.isEmpty else { return nil }
+        return scheme.lowercased()
+    }
+
+    // A return on the app host is used as is. One on the scheme, <scheme>://auth#codeMitra=...,
+    // becomes the app host with the same fragment: the SDK reads the fragment, never the scheme.
+    func appURL(fromReturn url: URL) -> URL? {
+        guard let appHost = appHost else { return nil }
+        if url.host?.lowercased() == appHost { return url }
+        guard let scheme = url.scheme?.lowercased(), scheme == callbackScheme,
+              var components = URLComponents(string: "https://\(appHost)/") else { return nil }
+        let incoming = URLComponents(url: url, resolvingAgainstBaseURL: false)
+        components.percentEncodedQuery = incoming?.percentEncodedQuery
+        components.percentEncodedFragment = incoming?.percentEncodedFragment
+        return components.url
     }
 
     func loadInShell(_ url: URL) {
@@ -107,9 +140,15 @@ public class MitraShellPlugin: CAPPlugin, CAPBridgedPlugin {
 
     @available(iOS 17.4, *)
     private func startSession(_ url: URL, appHost: String, shell: ShellBridgeViewController) {
-        // The https callback needs the webcredentials associated domain for the same host, which
-        // the generator declares in App.entitlements and the platform serves in the AASA file.
-        let callback = ASWebAuthenticationSession.Callback.https(host: appHost, path: "/")
+        let callback: ASWebAuthenticationSession.Callback
+        if let scheme = shell.callbackScheme {
+            // Nothing on the host: the app page bounces the SDK fragment to this scheme.
+            callback = .customScheme(scheme)
+        } else {
+            // The https callback needs the webcredentials associated domain for the same host, which
+            // the generator declares in App.entitlements and the platform serves in the AASA file.
+            callback = .https(host: appHost, path: "/")
+        }
         let session = ASWebAuthenticationSession(url: url, callback: callback) { [weak self, weak shell] callbackURL, error in
             self?.session = nil
             guard let callbackURL = callbackURL else {
@@ -121,7 +160,8 @@ public class MitraShellPlugin: CAPPlugin, CAPBridgedPlugin {
                 }
                 return
             }
-            shell?.loadInShell(callbackURL)
+            guard let target = shell?.appURL(fromReturn: callbackURL) else { return }
+            shell?.loadInShell(target)
         }
         session.prefersEphemeralWebBrowserSession = false
         session.presentationContextProvider = self

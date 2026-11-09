@@ -7,7 +7,8 @@
 //
 //   flags: [--name "..."] [--app-id x.y.z] [--icon <file|url>] [--theme "#0f172a"] [--version 1.0]
 //          [--build-number 1] [--associated-domains] [--auth-hosts a.com,b.com] [--out out]
-//          [--build debug|release] [--install] [--no-ios] [--debug] [--verbose] [--identity]
+//          [--callback scheme|https] [--build debug|release] [--install] [--no-ios] [--debug]
+//          [--verbose] [--identity]
 //
 // Source of truth for the identity is the platform: GET {api}/code-studio/api/v1/apps/{app}/info
 // (public, no token) gives name, published origins, accent color and the login logo. The page
@@ -19,6 +20,13 @@
 // SceneDelegate with the sign-in session and Universal Link handling on iOS),
 // generate icons and splash, cap sync, copy the CI workflow. Optionally builds and installs
 // the Android APK on the connected device or emulator.
+//
+// Sign-in return (--callback): the SDK ends a redirect sign-in on the app host, in the system
+// browser, with the single-use code in the URL fragment. "scheme" (default) brings it back to the
+// shell by a URL scheme named after the app id, which needs nothing on the host: the app page
+// bounces the fragment to the scheme (the snippet in app-snippet/, which the app must include).
+// "https" is the Universal Link callback, which needs the host to serve the
+// apple-app-site-association file (mitra-terraform#1101) and --associated-domains.
 
 import { execFileSync, spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, writeFileSync, cpSync, readdirSync, rmSync } from "node:fs";
@@ -61,8 +69,12 @@ const themeColor = flags.theme || descriptor.themeColor || info?.accentColor || 
 const versionName = String(flags.version || descriptor.version || "1.0");
 const buildNumber = Number(flags["build-number"] || descriptor.buildNumber || 1);
 const associatedDomains = Boolean(flags["associated-domains"] || descriptor.associatedDomains);
+const callback = String(flags.callback || descriptor.callback || "scheme");
+if (!["scheme", "https"].includes(callback)) fail(`--callback must be scheme or https, got ${callback}`);
 const iconSource = flags.icon || descriptor.icon || info?.logoUrl || scraped.icon;
 const host = new URL(url).host;
+// A bundle id is a valid URL scheme (letters, digits, dot, hyphen), unique per app on the device.
+const callbackScheme = callback === "scheme" ? appId.toLowerCase() : undefined;
 // Hosts whose top-level navigation is a sign-in: the shell opens them in a native auth session
 // (iOS) so the return lands in the WebView. The platform API host is where the SDK redirect
 // starts; the providers are where it continues.
@@ -88,7 +100,7 @@ log(`out      ${projectDir}`);
 // --identity: resolve and print the identity only (CI uses it to ask App Store Connect for the
 // next build number before generating, since the bundle id derives from the app name).
 if (flags.identity) {
-  const identity = { slug, appName, appId, url, host, authHosts };
+  const identity = { slug, appName, appId, url, host, authHosts, callback, callbackScheme };
   console.log(JSON.stringify(identity));
   githubOutputs(identity);
   process.exit(0);
@@ -130,7 +142,7 @@ writeJson(join(projectDir, "capacitor.config.json"), {
   plugins: {
     SplashScreen: { launchShowDuration: 1500, launchAutoHide: true, backgroundColor: themeColor, showSpinner: false },
     StatusBar: { style: isDark(themeColor) ? "DARK" : "LIGHT", backgroundColor: themeColor },
-    MitraShell: { authHosts }
+    MitraShell: { authHosts, ...(callbackScheme ? { callbackScheme } : {}) }
   }
 });
 
@@ -143,7 +155,7 @@ log(`logo     ${logoPath}`);
 // Descriptor echo, so the generated project is reproducible from itself.
 writeJson(join(projectDir, "mitra-shell.json"), {
   app: appUuid, api: appUuid ? apiBase : undefined,
-  url, name: appName, appId, themeColor, version: versionName, buildNumber, associatedDomains, authHosts,
+  url, name: appName, appId, themeColor, version: versionName, buildNumber, associatedDomains, authHosts, callback,
   icon: iconSource && !String(iconSource).startsWith("data:") ? iconSource : undefined,
   generatedAt: new Date().toISOString()
 });
@@ -154,18 +166,27 @@ run("npx", ["cap", "add", "android"], projectDir);
 if (wantIos) run("npx", ["cap", "add", "ios"], projectDir);
 
 // ---------- 4. Android patches ----------
-patchAndroid(projectDir, { appId, host, versionName, buildNumber });
+patchAndroid(projectDir, { appId, host, versionName, buildNumber, callbackScheme });
 
 // ---------- 5. iOS patches ----------
-if (wantIos) patchIos(projectDir, { appId, host, versionName, buildNumber, associatedDomains });
-if (wantIos) log(`ios      SceneDelegate with sign-in session for ${authHosts.join(", ")}`);
+if (wantIos) patchIos(projectDir, { appId, host, versionName, buildNumber, associatedDomains, callbackScheme });
+if (wantIos) log(`ios      SceneDelegate with sign-in session for ${authHosts.join(", ")}, callback ${callbackScheme ? callbackScheme + "://" : "https://" + host + "/"}`);
 
 // ---------- 6. Assets, sync, CI ----------
 run("npm", ["run", "assets"], projectDir);
 run("npx", ["cap", "sync"], projectDir);
 mkdirSync(join(projectDir, ".github", "workflows"), { recursive: true });
 cpSync(join(templateRoot, ".github", "workflows", "mobile.yml"), join(projectDir, ".github", "workflows", "mobile.yml"));
-writeFileSync(join(projectDir, "README.md"), readme({ appName, appId, url, slug, associatedDomains }));
+writeFileSync(join(projectDir, "README.md"), readme({ appName, appId, url, slug, associatedDomains, callbackScheme }));
+
+// What the published app itself has to carry for the return by scheme: the snippet for the head
+// of its index.html (the host serves nothing for the shell). The assetlinks.json Android reads
+// comes from generator/wellknown.mjs and goes to public/.well-known/ of the app.
+if (callbackScheme) {
+  mkdirSync(join(projectDir, "app-snippet"), { recursive: true });
+  writeFileSync(join(projectDir, "app-snippet", "shell-return.html"), shellReturnSnippet(callbackScheme));
+  log(`snippet  app-snippet/shell-return.html (the app includes it in index.html; return scheme ${callbackScheme}://)`);
+}
 
 // ---------- 7. Optional: build and install ----------
 const build = flags.build || descriptor.build;
@@ -233,7 +254,7 @@ async function materializeIcon(source, baseUrl, assetsDir) {
   return target;
 }
 
-function patchAndroid(dir, { appId, host, versionName, buildNumber }) {
+function patchAndroid(dir, { appId, host, versionName, buildNumber, callbackScheme }) {
   const app = join(dir, "android", "app");
 
   // Manifest: App Link for the published host, so the sign-in that ends on this host comes
@@ -247,7 +268,14 @@ function patchAndroid(dir, { appId, host, versionName, buildNumber }) {
                 <category android:name="android.intent.category.DEFAULT" />
                 <category android:name="android.intent.category.BROWSABLE" />
                 <data android:scheme="https" android:host="${host}" />
-            </intent-filter>
+            </intent-filter>${callbackScheme ? `
+            <!-- Sign-in return by URL scheme: the app page bounces the SDK fragment here (see app-snippet/) -->
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+                <data android:scheme="${callbackScheme}" />
+            </intent-filter>` : ""}
         </activity>`;
   manifest = manifest.replace(/\s*<\/activity>/, filter);
   writeFileSync(manifestPath, manifest);
@@ -256,7 +284,7 @@ function patchAndroid(dir, { appId, host, versionName, buildNumber }) {
   const javaDir = join(app, "src", "main", "java", ...appId.split("."));
   const mainActivity = join(javaDir, "MainActivity.java");
   if (!existsSync(mainActivity)) fail(`cap add did not create ${mainActivity}`);
-  writeFileSync(mainActivity, mainActivityJava(appId));
+  writeFileSync(mainActivity, mainActivityJava(appId, callbackScheme));
 
   // build.gradle: version and release signing from the environment.
   const gradlePath = join(app, "build.gradle");
@@ -295,10 +323,26 @@ function patchAndroid(dir, { appId, host, versionName, buildNumber }) {
   if (sdk) writeFileSync(join(dir, "android", "local.properties"), `sdk.dir=${sdk}\n`);
 }
 
-function patchIos(dir, { appId, host, versionName, buildNumber, associatedDomains }) {
+function patchIos(dir, { appId, host, versionName, buildNumber, associatedDomains, callbackScheme }) {
   const appDir = join(dir, "ios", "App", "App");
   const plistPath = join(appDir, "Info.plist");
   let plist = readFileSync(plistPath, "utf8");
+  if (callbackScheme && !plist.includes("CFBundleURLTypes")) {
+    // The sign-in return by scheme. ASWebAuthenticationSession catches it by itself; registering it
+    // also brings a tap on the fallback link of the app page back to the shell.
+    plist = plist.replace("\t<key>LSRequiresIPhoneOS</key>", `\t<key>CFBundleURLTypes</key>
+\t<array>
+\t\t<dict>
+\t\t\t<key>CFBundleURLName</key>
+\t\t\t<string>${appId}</string>
+\t\t\t<key>CFBundleURLSchemes</key>
+\t\t\t<array>
+\t\t\t\t<string>${callbackScheme}</string>
+\t\t\t</array>
+\t\t</dict>
+\t</array>
+\t<key>LSRequiresIPhoneOS</key>`);
+  }
   if (!plist.includes("ITSAppUsesNonExemptEncryption")) {
     plist = plist.replace("\t<key>LSRequiresIPhoneOS</key>", "\t<key>ITSAppUsesNonExemptEncryption</key>\n\t<false/>\n\t<key>LSRequiresIPhoneOS</key>");
   }
@@ -336,7 +380,7 @@ function patchIos(dir, { appId, host, versionName, buildNumber, associatedDomain
   writeFileSync(pbxPath, pbx);
 }
 
-function mainActivityJava(appId) {
+function mainActivityJava(appId, callbackScheme) {
   return `package ${appId};
 
 import android.content.Intent;
@@ -348,6 +392,8 @@ import com.getcapacitor.BridgeActivity;
 public class MainActivity extends BridgeActivity {
 
     private static final String SHELL_LINK_PARAM = "shellLink";
+    // Sign-in return by URL scheme (null when the shell relies on the App Link alone).
+    private static final String CALLBACK_SCHEME = ${callbackScheme ? JSON.stringify(callbackScheme) : "null"};
 
     // Capacitor only tells the web app about an incoming link (appUrlOpen); the app published
     // by the platform does not know the shell exists. So when the link is on the app's own host,
@@ -361,6 +407,12 @@ public class MainActivity extends BridgeActivity {
 
         String serverUrl = getBridge().getServerUrl();
         Uri app = Uri.parse(serverUrl != null ? serverUrl : getBridge().getAppUrl());
+        if (CALLBACK_SCHEME != null && CALLBACK_SCHEME.equalsIgnoreCase(data.getScheme())) {
+            // The app page bounced the SDK fragment to the shell by its scheme: carry the fragment
+            // to the app host, where the SDK finishes the sign-in at boot.
+            data = app.buildUpon().path("/").encodedQuery(data.getEncodedQuery())
+                .encodedFragment(data.getEncodedFragment()).build();
+        }
         if (data.getHost() == null || !data.getHost().equalsIgnoreCase(app.getHost())) return;
 
         // A fragment-only change would not reload the document, and the sign-in completes
@@ -372,6 +424,41 @@ public class MainActivity extends BridgeActivity {
         webView.post(() -> webView.loadUrl(target.toString()));
     }
 }
+`;
+}
+
+// The return snippet of the published app. A sign-in the shell started ends in the system browser
+// on the app host with the single-use code in the fragment; that browser never saw the sign-in
+// context (it lives in the WebView, in sessionStorage), so the page hands the fragment to the shell
+// by its scheme. A tab that holds a pending context started the sign-in itself and is left to the
+// SDK, so the web app keeps working in a plain browser. The fragment is cleared before the SDK
+// boots, or it would report the missing context as a CSRF error.
+function shellReturnSnippet(scheme) {
+  return `<script>
+(function () {
+  var scheme = ${JSON.stringify(scheme)};
+  var hash = location.hash || "";
+  if (hash.indexOf("codeMitra=") === -1 && hash.indexOf("errorMitra=") === -1) return;
+  try {
+    var stores = [sessionStorage, localStorage];
+    for (var s = 0; s < stores.length; s++) {
+      for (var i = 0; i < stores[s].length; i++) {
+        if (/^mitra_[a-z]+_redirect_/.test(stores[s].key(i) || "")) return;
+      }
+    }
+  } catch (e) {}
+  var target = scheme + "://auth" + hash;
+  history.replaceState(null, "", location.pathname + location.search);
+  location.replace(target);
+  document.addEventListener("DOMContentLoaded", function () {
+    var a = document.createElement("a");
+    a.href = target;
+    a.textContent = "Voltar ao app";
+    a.style.cssText = "position:fixed;left:0;right:0;bottom:32px;text-align:center;font:600 17px -apple-system,system-ui,sans-serif;z-index:2147483647";
+    document.body.appendChild(a);
+  });
+})();
+</script>
 `;
 }
 
@@ -400,7 +487,7 @@ function offlinePage(name, color) {
 `;
 }
 
-function readme({ appName, appId, url, slug, associatedDomains }) {
+function readme({ appName, appId, url, slug, associatedDomains, callbackScheme }) {
   return `# ${appName} (mobile shell)
 
 Generated by \`mitra-mobile-shell-spike/generator\` from ${url}. Do not edit by hand: change
@@ -411,7 +498,11 @@ Generated by \`mitra-mobile-shell-spike/generator\` from ${url}. Do not edit by 
 - Android: App Link intent-filter for the host, \`onNewIntent\` hands sign-in returns to the WebView,
   release signing from \`ANDROID_KEYSTORE_PATH\`, \`KEYSTORE_PASSWORD\`, \`KEY_ALIAS\`, \`KEY_PASSWORD\`.
 - iOS: exempt encryption declared; SceneDelegate opens sign-in hosts in an ASWebAuthenticationSession
-  with the app host as callback and loads Universal Links in the WebView; Associated Domains ${associatedDomains ? "ON (applinks and webcredentials for " + new URL(url).host + ")" : "off (pass --associated-domains once the host serves the AASA file)"}.
+  and loads Universal Links in the WebView; Associated Domains ${associatedDomains ? "ON (applinks and webcredentials for " + new URL(url).host + ")" : "off (pass --associated-domains once the host serves the AASA file)"}.
+- Sign-in return: ${callbackScheme ? `by URL scheme \`${callbackScheme}://\` (nothing needed on the host). The app itself must carry
+  \`app-snippet/shell-return.html\` in the head of its index.html, and for Android App Links its
+  \`public/.well-known/assetlinks.json\` (from \`generator/wellknown.mjs\`).` : `by https callback on the app host (Universal Link),
+  which needs the host to serve the apple-app-site-association file.`}
 - CI: \`.github/workflows/mobile.yml\` (same secrets as the spike: Android keystore, App Store Connect API key).
 
 \`\`\`bash
