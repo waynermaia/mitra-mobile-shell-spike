@@ -392,7 +392,7 @@ async function fetchText(u) {
 }
 function clean(title) {
   // "Name - tagline", "Name | tagline" and the dash variants: keep the name only.
-  return title.split(/\s+[-|–—:]\s+/)[0].trim();
+  return title.split(/\s+[-|\u2013\u2014:]\s+/)[0].trim();
 }
 function slugify(s) {
   return s.normalize("NFD").replace(/[̀-ͯ]/g, "").toLowerCase().replace(/[^a-z0-9]+/g, "").slice(0, 40) || "app";
