@@ -24,6 +24,43 @@ Target app: **Bolo Mobile Spike**, created in Infusion for this test. Published 
 Plugins installed: app, splash-screen, status-bar, share, haptics, network, browser,
 push-notifications (push needs Firebase on Android and the aps entitlement on iOS; not wired).
 
+## Generator (POC, 2026-11-08): one shell per app, from its published URL
+
+`generator/generate.mjs` turns this repo into a template. Input is the published URL (or a
+small descriptor in `apps/*.json`); output is a complete Capacitor project under `out/<slug>/`
+(git-ignored) with every patch the spike proved already applied.
+
+```bash
+node generator/generate.mjs --url https://crew.mitralab.io --build debug --install
+node generator/generate.mjs --descriptor apps/bolo.json --build debug
+node generator/generate.mjs --url <url> --name "Nome" --app-id br.com.x.app --icon logo.svg \
+  --theme "#112233" --version 1.2 --build-number 7 --associated-domains --no-ios
+```
+
+What it resolves from the page when not given: `<title>` (text before the first " - " or
+" | "), `apple-touch-icon` or `rel=icon` (SVG or PNG, inline `data:` works), `theme-color`.
+Derived: slug, app id `cloud.infusion.<slug>`, host for the App Link. Steps: write
+`package.json` (same pinned deps and lockfile as this repo), `capacitor.config.json`,
+`www/index.html` offline page, `assets/logo.*`; `npm ci`; `cap add android` and `cap add ios`;
+patch Android (App Link intent-filter for the host, `MainActivity.onNewIntent`, release signing
+from env, `local.properties`), patch iOS (`ITSAppUsesNonExemptEncryption`, version and build
+number, optional `App.entitlements` with `applinks:<host>` wired through
+`CODE_SIGN_ENTITLEMENTS`); `capacitor-assets generate`; `cap sync`; copy
+`.github/workflows/mobile.yml` and write a README plus `mitra-shell.json` (the descriptor echo).
+`--build debug|release` runs Gradle, `--install` does `adb install -r`.
+
+Proved on 2026-11-08 on the Pixel 7 emulator: Bolo (`cloud.infusion.bolomobilespike`, icon from
+the inline SVG favicon) and Mitra Crew (`cloud.infusion.mitracrew`, icon from `icone.svg`,
+white theme) generated from their URLs only, both installed side by side with their own icon,
+name and URL; 16 to 25 s per app end to end on this Mac. Google sign-in on the generated Bolo
+shell finished in the app (Chrome, account picker, App Link back, task list rendered), with the
+host approved by `pm set-app-links` as in the spike.
+
+Not covered by the POC: the iOS build of a generated project was not run (no Xcode here; the
+project is byte-equivalent to this repo's `ios/` except for identity, so the same workflow
+applies), store account steps stay manual as documented above, and the assetlinks / AASA files
+remain a platform change.
+
 ## Local commands
 
 ```bash
