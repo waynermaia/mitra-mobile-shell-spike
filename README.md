@@ -24,22 +24,26 @@ Target app: **Bolo Mobile Spike**, created in Infusion for this test. Published 
 Plugins installed: app, splash-screen, status-bar, share, haptics, network, browser,
 push-notifications (push needs Firebase on Android and the aps entitlement on iOS; not wired).
 
-## Generator (POC, 2026-11-08): one shell per app, from its published URL
+## Generator (POC, 2026-11-08): one shell per app, from the platform app id
 
-`generator/generate.mjs` turns this repo into a template. Input is the published URL (or a
-small descriptor in `apps/*.json`); output is a complete Capacitor project under `out/<slug>/`
-(git-ignored) with every patch the spike proved already applied.
+`generator/generate.mjs` turns this repo into a template. Input is the platform app UUID (or a
+published URL, or a small descriptor in `apps/*.json`); output is a complete Capacitor project
+under `out/<slug>/` (git-ignored) with every patch the spike proved already applied.
 
 ```bash
-node generator/generate.mjs --url https://crew.mitralab.io --build debug --install
+node generator/generate.mjs --app f98fa7c6-00f3-433a-9646-66e3d497995f --build debug --install
 node generator/generate.mjs --descriptor apps/bolo.json --build debug
 node generator/generate.mjs --url <url> --name "Nome" --app-id br.com.x.app --icon logo.svg \
   --theme "#112233" --version 1.2 --build-number 7 --associated-domains --no-ios
 ```
 
-What it resolves from the page when not given: `<title>` (text before the first " - " or
-" | "), `apple-touch-icon` or `rel=icon` (SVG or PNG, inline `data:` works), `theme-color`.
-Derived: slug, app id `cloud.infusion.<slug>`, host for the App Link. Steps: write
+Source of truth is the platform: `GET {api}/code-studio/api/v1/apps/{app}/info` (public route,
+no token; `--api` defaults to `https://beta.mitralab.io`) gives the name, the served origins
+(platform host first, active custom domain last; the generator loads the last one), the accent
+color and the login logo. The page is only scraped for what the API does not carry yet: the
+icon when the app has no login logo (`apple-touch-icon`, then `rel=icon`; SVG or PNG, inline
+`data:` works), plus title and `theme-color` in `--url` mode.
+Derived: slug, app id `cloud.<brand>.<slug>`, host for the App Link. Steps: write
 `package.json` (same pinned deps and lockfile as this repo), `capacitor.config.json`,
 `www/index.html` offline page, `assets/logo.*`; `npm ci`; `cap add android` and `cap add ios`;
 patch Android (App Link intent-filter for the host, `MainActivity.onNewIntent`, release signing
@@ -47,7 +51,17 @@ from env, `local.properties`), patch iOS (`ITSAppUsesNonExemptEncryption`, versi
 number, optional `App.entitlements` with `applinks:<host>` wired through
 `CODE_SIGN_ENTITLEMENTS`); `capacitor-assets generate`; `cap sync`; copy
 `.github/workflows/mobile.yml` and write a README plus `mitra-shell.json` (the descriptor echo).
-`--build debug|release` runs Gradle, `--install` does `adb install -r`.
+`--build debug|release` runs Gradle, `--install` does `adb install -r`. The run ends with
+`out/last.json` and, under GitHub Actions, the same fields in `GITHUB_OUTPUT`.
+
+CI per app: `.github/workflows/shell.yml` (Actions -> App shell -> Run workflow) takes the app
+UUID (or a URL), the API base, an optional bundle id override, the marketing version and two
+switches: `associated_domains` and `upload_testflight`. The Android job builds the signed AAB
+and APK (artifact `android-<slug>`); the iOS job does an unsigned device build by default and,
+with `upload_testflight`, the cloud-signed archive and the upload (the bundle id and the app
+record must already exist in App Store Connect, see the checklist above). Runners come from the
+repository variables `LINUX_RUNNER` and `MACOS_RUNNER` (defaults `ubuntu-latest` and
+`macos-26`), so moving to self-hosted machines is a variable change.
 
 Proved on 2026-11-08 on the Pixel 7 emulator: Bolo (`cloud.infusion.bolomobilespike`, icon from
 the inline SVG favicon) and Mitra Crew (`cloud.infusion.mitracrew`, icon from `icone.svg`,
@@ -56,10 +70,15 @@ name and URL; 16 to 25 s per app end to end on this Mac. Google sign-in on the g
 shell finished in the app (Chrome, account picker, App Link back, task list rendered), with the
 host approved by `pm set-app-links` as in the spike.
 
-Not covered by the POC: the iOS build of a generated project was not run (no Xcode here; the
-project is byte-equivalent to this repo's `ios/` except for identity, so the same workflow
-applies), store account steps stay manual as documented above, and the assetlinks / AASA files
-remain a platform change.
+CI proof on 2026-11-09 (workflow `App shell`): run 42598065986 for Bolo by app UUID with
+`upload_testflight` (Android signed, iOS archive with cloud signing, "Upload succeeded" to App
+Store Connect) and run 42598070056 for Mitra Crew by app UUID (Android signed, unsigned iOS
+device build with bundle id `cloud.mitra.mitracrew`); about 4 minutes each.
+
+Not covered by the POC: store account steps stay manual as documented above (bundle id and app
+record for a new app), the build number is the workflow run number (a per-app counter is needed
+before two apps share real release trains), and the assetlinks / AASA files remain a platform
+change.
 
 ## Local commands
 
