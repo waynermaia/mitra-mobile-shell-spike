@@ -1,6 +1,7 @@
-name: ASC info
+name: ASC tools
 
-# Diagnostic: what App Store Connect returns for an app (record, latest build, groups). Read only.
+# Diagnostics and small TestFlight chores against App Store Connect: what the API returns for an
+# app (record, builds, groups) and, when build and group are given, add that build to the group.
 
 on:
   workflow_dispatch:
@@ -9,18 +10,34 @@ on:
         description: "Bundle id to inspect"
         type: string
         default: "cloud.infusion.bolomobilespike"
+      build:
+        description: "Build number to add to a TestFlight group (with group)"
+        type: string
+        default: ""
+      group:
+        description: "TestFlight group name (with build)"
+        type: string
+        default: ""
 
 jobs:
-  info:
+  tools:
     runs-on: ${{ vars.LINUX_RUNNER || 'ubuntu-latest' }}
     env:
       ASC_KEY_ID: ${{ secrets.ASC_KEY_ID }}
       ASC_ISSUER_ID: ${{ secrets.ASC_ISSUER_ID }}
       ASC_KEY_P8_B64: ${{ secrets.ASC_KEY_P8_B64 }}
+      BUNDLE_ID: ${{ inputs.bundle_id }}
+      BUILD: ${{ inputs.build }}
+      GROUP: ${{ inputs.group }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
           node-version: 22
-      - run: node generator/asc.mjs info --bundle-id "${{ inputs.bundle_id }}" --verbose
-      - run: node generator/asc.mjs next-build --bundle-id "${{ inputs.bundle_id }}" --fallback 999 --verbose
+      - name: Info
+        run: node generator/asc.mjs info --bundle-id "$BUNDLE_ID"
+      - name: Builds
+        run: node generator/asc.mjs builds --bundle-id "$BUNDLE_ID"
+      - name: Add the build to the group
+        if: ${{ inputs.build != '' && inputs.group != '' }}
+        run: node generator/asc.mjs add-to-group --bundle-id "$BUNDLE_ID" --build "$BUILD" --group "$GROUP"

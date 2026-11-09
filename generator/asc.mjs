@@ -7,6 +7,7 @@
 //   node generator/asc.mjs wait-build --bundle-id cloud.x.y --build N [--timeout-minutes 20]
 //   node generator/asc.mjs add-to-group --bundle-id cloud.x.y --build N --group "Group Name"
 //   node generator/asc.mjs info --bundle-id cloud.x.y
+//   node generator/asc.mjs builds --bundle-id cloud.x.y
 //   node generator/asc.mjs selftest
 //
 // Env: ASC_KEY_ID, ASC_ISSUER_ID, and the private key as ASC_KEY_PATH (a .p8 file) or
@@ -195,6 +196,16 @@ const commands = {
     const r = await api("POST", `/v1/betaGroups/${g.id}/relationships/builds`, { data: [{ type: "builds", id: b.id }] }, { allow: [409] });
     if (r && r.status === 409 && !/already/i.test(r.errorText)) throw new Error(`adding build to group -> 409: ${r.errorText.slice(0, 600)}`);
     console.log(JSON.stringify({ group: g.id, build: b.id }));
+  },
+
+  // Every build the API lists for the app, newest first: what next-build chooses from.
+  async builds({ "bundle-id": bundleId }) {
+    need({ bundleId });
+    const app = requireApp(await findApp(bundleId), bundleId);
+    const r = await api("GET", `/v1/builds?filter[app]=${app.id}&sort=-uploadedDate&limit=50&fields[builds]=version,processingState,uploadedDate,expired&include=preReleaseVersion&fields[preReleaseVersions]=version`);
+    const trains = Object.fromEntries((r.included || []).map((i) => [i.id, i.attributes.version]));
+    const rows = r.data.map((b) => ({ build: b.attributes.version, train: trains[b.relationships?.preReleaseVersion?.data?.id] ?? null, state: b.attributes.processingState, expired: b.attributes.expired, uploaded: b.attributes.uploadedDate }));
+    console.log(JSON.stringify(rows, null, 2));
   },
 
   async info({ "bundle-id": bundleId }) {
