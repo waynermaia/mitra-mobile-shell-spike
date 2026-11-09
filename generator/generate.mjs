@@ -1,13 +1,19 @@
 #!/usr/bin/env node
-// POC: generate a Capacitor shell for ONE app published by the platform, from its public URL.
+// POC: generate a Capacitor shell for ONE app published by the platform.
 //
-//   node generator/generate.mjs --url https://<published host> [--name "..."] [--app-id x.y.z]
-//        [--icon <file|url>] [--theme "#0f172a"] [--version 1.0] [--build-number 1]
-//        [--associated-domains] [--out out] [--build debug|release] [--install] [--no-ios]
-//   node generator/generate.mjs --descriptor apps/bolo.json [same flags override the file]
+//   node generator/generate.mjs --app <app uuid> [--api https://beta.mitralab.io] [...flags]
+//   node generator/generate.mjs --url https://<published host> [...flags]
+//   node generator/generate.mjs --descriptor apps/bolo.json [flags override the file]
 //
-// What it does, in order: read the descriptor (or scrape title, icon and theme-color from the
-// published page), write package.json + capacitor.config.json + www/ + assets/, npm ci,
+//   flags: [--name "..."] [--app-id x.y.z] [--icon <file|url>] [--theme "#0f172a"] [--version 1.0]
+//          [--build-number 1] [--associated-domains] [--out out] [--build debug|release] [--install]
+//          [--no-ios] [--debug] [--verbose]
+//
+// Source of truth for the identity is the platform: GET {api}/code-studio/api/v1/apps/{app}/info
+// (public, no token) gives name, published origins, accent color and the login logo. The page
+// itself is only scraped for what the API does not carry yet (the icon when there is no login
+// logo, title and theme-color in --url mode). Then it writes package.json +
+// capacitor.config.json + www/ + assets/, npm ci,
 // cap add android/ios, apply the patches the spike proved (App Link intent-filter, onNewIntent
 // in MainActivity, release signing from env, exempt encryption, optional Associated Domains),
 // generate icons and splash, cap sync, copy the CI workflow. Optionally builds and installs
@@ -34,26 +40,32 @@ for (let i = 0; i < args.length; i++) {
 }
 
 const descriptor = flags.descriptor ? JSON.parse(readFileSync(resolve(flags.descriptor), "utf8")) : {};
-const url = flags.url || descriptor.url;
-if (!url) fail("Missing --url (published app URL) or --descriptor <file> with a url field.");
+const appUuid = flags.app || descriptor.app;
+const apiBase = String(flags.api || descriptor.api || process.env.MITRA_API_URL || "https://beta.mitralab.io").replace(/\/$/, "");
 const outRoot = resolve(flags.out || descriptor.out || join(templateRoot, "out"));
 const wantIos = !flags["no-ios"] && descriptor.ios !== false;
 
 // ---------- 1. Resolve the app identity ----------
+// Platform first: the public app info carries name, origins, accent color and login logo.
+const info = appUuid ? await fetchAppInfo(apiBase, appUuid) : null;
+const url = flags.url || descriptor.url || (info && pickOrigin(info.origins));
+if (!url) fail("Missing --app <uuid> (platform app) or --url <published URL>, or a descriptor with one of them.");
+if (info && !info.origins?.length) fail(`App ${appUuid} has no published origin yet; publish it first or pass --url.`);
 const page = await fetchText(url);
 const scraped = scrape(page, url);
-const appName = clean(flags.name || descriptor.name || scraped.title || new URL(url).hostname);
+const appName = clean(flags.name || descriptor.name || info?.name || scraped.title || new URL(url).hostname);
 const slug = slugify(appName);
-const appId = flags["app-id"] || descriptor.appId || `cloud.infusion.${packageSegment(slug)}`;
-const themeColor = flags.theme || descriptor.themeColor || scraped.themeColor || "#0f172a";
+const appId = flags["app-id"] || descriptor.appId || `cloud.${brandSegment(info?.brand)}.${packageSegment(slug)}`;
+const themeColor = flags.theme || descriptor.themeColor || info?.accentColor || scraped.themeColor || "#0f172a";
 const versionName = String(flags.version || descriptor.version || "1.0");
 const buildNumber = Number(flags["build-number"] || descriptor.buildNumber || 1);
 const associatedDomains = Boolean(flags["associated-domains"] || descriptor.associatedDomains);
-const iconSource = flags.icon || descriptor.icon || scraped.icon;
+const iconSource = flags.icon || descriptor.icon || info?.logoUrl || scraped.icon;
 const host = new URL(url).host;
 const projectDir = join(outRoot, slug);
 
 validateAppId(appId);
+if (info) log(`source   ${apiBase}/code-studio/api/v1/apps/${appUuid}/info (origins: ${info.origins.join(", ")})`);
 log(`app      ${appName}`);
 log(`slug     ${slug}`);
 log(`appId    ${appId}`);
@@ -109,6 +121,7 @@ log(`logo     ${logoPath}`);
 
 // Descriptor echo, so the generated project is reproducible from itself.
 writeJson(join(projectDir, "mitra-shell.json"), {
+  app: appUuid, api: appUuid ? apiBase : undefined,
   url, name: appName, appId, themeColor, version: versionName, buildNumber, associatedDomains,
   icon: iconSource && !String(iconSource).startsWith("data:") ? iconSource : undefined,
   generatedAt: new Date().toISOString()
@@ -134,10 +147,11 @@ writeFileSync(join(projectDir, "README.md"), readme({ appName, appId, url, slug,
 
 // ---------- 7. Optional: build and install ----------
 const build = flags.build || descriptor.build;
+let apk;
 if (build) {
   const task = build === "release" ? "assembleRelease" : "assembleDebug";
   run("./gradlew", ["--no-daemon", "-q", task], join(projectDir, "android"));
-  const apk = findApk(join(projectDir, "android", "app", "build", "outputs", "apk", build === "release" ? "release" : "debug"));
+  apk = findApk(join(projectDir, "android", "app", "build", "outputs", "apk", build === "release" ? "release" : "debug"));
   log(`apk      ${apk}`);
   if (flags.install || descriptor.install) {
     run("adb", ["install", "-r", apk], projectDir);
@@ -145,6 +159,13 @@ if (build) {
   }
 }
 
+// Machine-readable summary for the caller (CI reads it to name artifacts and find the project).
+const summary = { slug, appName, appId, url, host, projectDir, apk };
+writeJson(join(outRoot, "last.json"), summary);
+if (process.env.GITHUB_OUTPUT) {
+  writeFileSync(process.env.GITHUB_OUTPUT, Object.entries(summary).filter(([, v]) => v !== undefined)
+    .map(([k, v]) => `${k.replace(/[A-Z]/g, (c) => "_" + c.toLowerCase())}=${v}\n`).join(""), { flag: "a" });
+}
 log("done");
 
 // ======================================================================
@@ -377,6 +398,21 @@ Slug: \`${slug}\`.
 }
 
 // ---------- helpers ----------
+async function fetchAppInfo(base, id) {
+  if (!/^[0-9a-f-]{36}$/i.test(id)) fail(`--app must be the app UUID, got ${id}`);
+  const u = `${base}/code-studio/api/v1/apps/${id}/info`;
+  const res = await fetch(u, { headers: { accept: "application/json" } });
+  if (!res.ok) fail(`GET ${u} returned ${res.status}`);
+  return res.json();
+}
+function pickOrigin(origins) {
+  // code-studio lists the platform host(s) first and the active custom domain last; the custom
+  // domain is what the owner shows to users, so the last entry is the one the shell should load.
+  return origins[origins.length - 1];
+}
+function brandSegment(brand) {
+  return brand && /^[a-z][a-z0-9]*$/.test(brand) ? brand : "infusion";
+}
 function run(cmd, cmdArgs, cwd) {
   log(`$ ${cmd} ${cmdArgs.join(" ")}   (in ${cwd.replace(templateRoot, ".")})`);
   const r = spawnSync(cmd, cmdArgs, { cwd, stdio: flags.verbose ? "inherit" : ["ignore", "pipe", "pipe"], env: { ...process.env, CI: "1" } });

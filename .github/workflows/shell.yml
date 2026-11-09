@@ -1,0 +1,196 @@
+name: App shell
+
+# One run = one app. The generator resolves the app through the platform API, writes the
+# Capacitor project, and the two jobs build it: Android (signed AAB + APK when the keystore
+# secrets exist) and iOS (unsigned device build by default; with upload_testflight the archive
+# is cloud-signed with the App Store Connect API key and uploaded).
+#
+# Runners come from repository variables so the same workflow runs on GitHub-hosted machines
+# today and on self-hosted ones later: LINUX_RUNNER (default ubuntu-latest) and MACOS_RUNNER
+# (default macos-26, the first image with the iOS 26 SDK App Store Connect requires).
+
+on:
+  workflow_dispatch:
+    inputs:
+      app:
+        description: "Platform app UUID (resolved through {api}/code-studio/api/v1/apps/{app}/info)"
+        type: string
+        default: ""
+      api:
+        description: "Platform API base URL"
+        type: string
+        default: "https://beta.mitralab.io"
+      url:
+        description: "Published URL, only when there is no app UUID"
+        type: string
+        default: ""
+      app_id:
+        description: "Override the Android application id / iOS bundle id"
+        type: string
+        default: ""
+      version:
+        description: "Marketing version (the build number is the run number)"
+        type: string
+        default: "1.0"
+      associated_domains:
+        description: "Declare applinks:<host> on iOS (needs the AASA file served by the host)"
+        type: boolean
+        default: false
+      upload_testflight:
+        description: "Archive with cloud signing and upload to TestFlight (bundle id and app record must exist in App Store Connect)"
+        type: boolean
+        default: false
+
+env:
+  INPUT_APP: ${{ inputs.app }}
+  INPUT_API: ${{ inputs.api }}
+  INPUT_URL: ${{ inputs.url }}
+  INPUT_APP_ID: ${{ inputs.app_id }}
+  INPUT_VERSION: ${{ inputs.version }}
+  INPUT_ASSOCIATED_DOMAINS: ${{ inputs.associated_domains }}
+
+jobs:
+  android:
+    name: Android (signed AAB and APK)
+    runs-on: ${{ vars.LINUX_RUNNER || 'ubuntu-latest' }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 21
+      - name: Generate the shell
+        id: gen
+        run: |
+          args=(--build-number "$GITHUB_RUN_NUMBER" --version "$INPUT_VERSION" --no-ios --verbose)
+          [ -n "$INPUT_APP" ] && args+=(--app "$INPUT_APP" --api "$INPUT_API")
+          [ -n "$INPUT_URL" ] && args+=(--url "$INPUT_URL")
+          [ -n "$INPUT_APP_ID" ] && args+=(--app-id "$INPUT_APP_ID")
+          [ -n "$INPUT_APP$INPUT_URL" ] || { echo "::error::Give app (UUID) or url"; exit 1; }
+          node generator/generate.mjs "${args[@]}"
+      - name: Restore the upload keystore
+        env:
+          ANDROID_KEYSTORE_B64: ${{ secrets.ANDROID_KEYSTORE_B64 }}
+        run: |
+          if [ -n "$ANDROID_KEYSTORE_B64" ]; then
+            echo "$ANDROID_KEYSTORE_B64" | base64 -d > "$RUNNER_TEMP/upload.jks"
+            echo "ANDROID_KEYSTORE_PATH=$RUNNER_TEMP/upload.jks" >> "$GITHUB_ENV"
+          else
+            echo "No keystore secret: building unsigned."
+          fi
+      - name: Build
+        working-directory: ${{ steps.gen.outputs.project_dir }}/android
+        env:
+          KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
+        run: ./gradlew --no-daemon bundleRelease assembleRelease
+      - uses: actions/upload-artifact@v4
+        with:
+          name: android-${{ steps.gen.outputs.slug }}
+          path: |
+            ${{ steps.gen.outputs.project_dir }}/android/app/build/outputs/bundle/release/*.aab
+            ${{ steps.gen.outputs.project_dir }}/android/app/build/outputs/apk/release/*.apk
+            ${{ steps.gen.outputs.project_dir }}/mitra-shell.json
+          if-no-files-found: error
+
+  ios:
+    name: iOS (${{ inputs.upload_testflight && 'cloud signing and TestFlight upload' || 'unsigned device build' }})
+    runs-on: ${{ vars.MACOS_RUNNER || 'macos-26' }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - name: Generate the shell
+        id: gen
+        run: |
+          args=(--build-number "$GITHUB_RUN_NUMBER" --version "$INPUT_VERSION" --verbose)
+          [ -n "$INPUT_APP" ] && args+=(--app "$INPUT_APP" --api "$INPUT_API")
+          [ -n "$INPUT_URL" ] && args+=(--url "$INPUT_URL")
+          [ -n "$INPUT_APP_ID" ] && args+=(--app-id "$INPUT_APP_ID")
+          [ "$INPUT_ASSOCIATED_DOMAINS" = "true" ] && args+=(--associated-domains)
+          [ -n "$INPUT_APP$INPUT_URL" ] || { echo "::error::Give app (UUID) or url"; exit 1; }
+          node generator/generate.mjs "${args[@]}"
+      - name: Unsigned device build
+        if: ${{ !inputs.upload_testflight }}
+        working-directory: ${{ steps.gen.outputs.project_dir }}
+        run: |
+          xcodebuild -project ios/App/App.xcodeproj -scheme App -configuration Release \
+            -destination 'generic/platform=iOS' \
+            -derivedDataPath "$RUNNER_TEMP/dd" \
+            CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO build | tail -40
+          ls "$RUNNER_TEMP/dd/Build/Products/Release-iphoneos/"
+      - name: Check the App Store Connect secrets
+        if: ${{ inputs.upload_testflight }}
+        env:
+          ASC_KEY_ID: ${{ secrets.ASC_KEY_ID }}
+          ASC_ISSUER_ID: ${{ secrets.ASC_ISSUER_ID }}
+          ASC_KEY_P8_B64: ${{ secrets.ASC_KEY_P8_B64 }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          for v in ASC_KEY_ID ASC_ISSUER_ID ASC_KEY_P8_B64 APPLE_TEAM_ID; do
+            [ -n "${!v}" ] || { echo "::error::Missing secret $v"; exit 1; }
+          done
+          mkdir -p "$RUNNER_TEMP/asc"
+          echo "$ASC_KEY_P8_B64" | base64 -d > "$RUNNER_TEMP/asc/AuthKey_$ASC_KEY_ID.p8"
+      - name: Archive with cloud signing
+        if: ${{ inputs.upload_testflight }}
+        working-directory: ${{ steps.gen.outputs.project_dir }}
+        env:
+          ASC_KEY_ID: ${{ secrets.ASC_KEY_ID }}
+          ASC_ISSUER_ID: ${{ secrets.ASC_ISSUER_ID }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          xcodebuild -project ios/App/App.xcodeproj -scheme App -configuration Release \
+            -destination 'generic/platform=iOS' \
+            -archivePath "$RUNNER_TEMP/App.xcarchive" \
+            -allowProvisioningUpdates \
+            -authenticationKeyPath "$RUNNER_TEMP/asc/AuthKey_$ASC_KEY_ID.p8" \
+            -authenticationKeyID "$ASC_KEY_ID" \
+            -authenticationKeyIssuerID "$ASC_ISSUER_ID" \
+            DEVELOPMENT_TEAM="$APPLE_TEAM_ID" \
+            archive | tail -40
+      - name: Export and upload to App Store Connect
+        if: ${{ inputs.upload_testflight }}
+        env:
+          ASC_KEY_ID: ${{ secrets.ASC_KEY_ID }}
+          ASC_ISSUER_ID: ${{ secrets.ASC_ISSUER_ID }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          cat > "$RUNNER_TEMP/export.plist" <<EOF
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0"><dict>
+            <key>method</key><string>app-store-connect</string>
+            <key>destination</key><string>upload</string>
+            <key>teamID</key><string>$APPLE_TEAM_ID</string>
+            <key>signingStyle</key><string>automatic</string>
+            <key>uploadSymbols</key><true/>
+          </dict></plist>
+          EOF
+          xcodebuild -exportArchive \
+            -archivePath "$RUNNER_TEMP/App.xcarchive" \
+            -exportOptionsPlist "$RUNNER_TEMP/export.plist" \
+            -exportPath "$RUNNER_TEMP/export" \
+            -allowProvisioningUpdates \
+            -authenticationKeyPath "$RUNNER_TEMP/asc/AuthKey_$ASC_KEY_ID.p8" \
+            -authenticationKeyID "$ASC_KEY_ID" \
+            -authenticationKeyIssuerID "$ASC_ISSUER_ID" | tail -40
+      - name: Summary
+        run: |
+          {
+            echo "### ${{ steps.gen.outputs.app_name }}"
+            echo "- bundle id: \`${{ steps.gen.outputs.app_id }}\`"
+            echo "- loads: ${{ steps.gen.outputs.url }}"
+            echo "- build: ${{ inputs.version }} ($GITHUB_RUN_NUMBER)"
+            echo "- iOS: ${{ inputs.upload_testflight && 'uploaded to TestFlight' || 'unsigned device build only' }}"
+          } >> "$GITHUB_STEP_SUMMARY"
