@@ -89,12 +89,21 @@ old one (system browser).
 ### Association files the host must serve
 
 `generator/wellknown.mjs --project out/<slug> --team <Apple Team ID> --keystore ... --play-sha256 ...`
-writes `out/<slug>/wellknown/apple-app-site-association`, `assetlinks.json` and the
-KeyValueStore value the platform edge serves them from (key `mobile:<host>`; the platform change
-is `mitra-terraform` module `storage`, function `apps-wellknown.js` on a `/.well-known/*`
-behavior), and prints the `aws cloudfront-keyvaluestore put-key` command for the operator. The
-Android fingerprints are the upload key (APK by adb) and the Play App Signing key (store
-installs); both are listed for Bolo.
+writes `out/<slug>/wellknown/apple-app-site-association` and `assetlinks.json`, and with
+`--bucket <deploys bucket> --prefix <deploys_path_prefix>` prints the two `aws s3 cp` commands for
+the operator. The platform edge serves `/.well-known/<file>` of a host from the stable prefix of
+the host, `{deploys_path_prefix}hosts/{host}/.well-known/<file>`, the same place as its stable
+`index.html` ([mitra-terraform#1101](https://github.com/mitralab-dev/mitra-terraform/issues/1101),
+PR [#1102](https://github.com/mitralab-dev/mitra-terraform/pull/1102)). Nothing goes to the
+CloudFront KeyValueStore: it is at 60 percent of its hard ceiling and leaving the routing
+(mitra-terraform#1073), so a first version of this work that read a `mobile:<host>` key from it
+was dropped before the PR. On a host whose key still lives under a legacy host (alpha reads
+`.infusion-ai.cloud` through `.infusion.cloud`) the prefix is the legacy host: `--key-host` names
+it, and the printed `curl` tells which one answered. The code-studio does not write these files
+yet, and its publish prunes the host prefix of what it did not write, so on a host it already
+manages the operator copy lasts until the next routing event; the product step is the code-studio
+writing both files on publish. The Android fingerprints are the upload key (APK by adb) and the
+Play App Signing key (store installs); both are listed for Bolo.
 
 Still manual, by design of the stores: the app record in App Store Connect (no public create-app
 endpoint), the app and its first AAB in Play Console, and the Play service account key
