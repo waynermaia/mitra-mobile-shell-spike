@@ -62,6 +62,13 @@ on:
         type: string
         default: "internal"
 
+# One run per app at a time: the build number is read from App Store Connect before the upload,
+# so two runs of the same app would ask for the same number. A queued run waits, it is not
+# cancelled: cancelling after the upload burns the number.
+concurrency:
+  group: shell-${{ inputs.app || inputs.url }}
+  cancel-in-progress: false
+
 env:
   INPUT_APP: ${{ inputs.app }}
   INPUT_API: ${{ inputs.api }}
@@ -246,6 +253,7 @@ jobs:
             <key>teamID</key><string>$APPLE_TEAM_ID</string>
             <key>signingStyle</key><string>automatic</string>
             <key>uploadSymbols</key><true/>
+            <key>manageAppVersionAndBuildNumber</key><false/>
           </dict></plist>
           EOF
           xcodebuild -exportArchive \
