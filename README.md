@@ -86,7 +86,33 @@ next to `applinks:<host>` in `App.entitlements` (both written by `--associated-d
 host serving the AASA file. Below 17.4, or when the session cannot start, the behavior is the
 old one (system browser).
 
-### Association files the host must serve
+### Sign-in return without touching the platform (2026-11-09, default)
+
+The shell no longer needs anything served on the app host. `--callback scheme` (the default) makes
+the iOS sign-in session end on a URL scheme named after the app id (`cloud.infusion.bolomobilespike://`)
+and registers the same scheme on Android, next to the App Link. Who navigates to the scheme is the
+app itself: the SDK ends a redirect sign-in on the app host, in the system browser, with the single-use
+code in the fragment (`/#codeMitra=...&stateMitra=...`), and `sdk-auth.html` only accepts an http(s)
+return origin, so the bounce has to happen on the app page. The generator writes it to
+`out/<slug>/app-snippet/shell-return.html`: a head script that, when the fragment carries `codeMitra`
+and the tab holds no `mitra_*_redirect_*` context of its own (the context lives in the shell's WebView),
+clears the fragment and does `location.replace("<scheme>://auth#...")`, with a "Voltar ao app" link as
+fallback. The shell turns the scheme URL back into the app host plus fragment and loads it in the
+WebView, where the SDK finishes the sign-in. A plain browser tab that started the sign-in keeps its
+context and is left to the SDK, so the web app is unchanged for web users.
+
+What the published app must carry (the platform agent adds both; nothing on the host):
+
+- the snippet in the head of `index.html`, before any other script;
+- for Android App Links on real devices, `public/.well-known/assetlinks.json` from
+  `generator/wellknown.mjs` (it has an extension, so the deploy serves it as is).
+
+Trade-offs: a URL scheme can be claimed by another app on the device, so the single-use code could be
+handed to the wrong app; acceptable for Mitra's own apps, and the reason the Universal Link path
+below stays the long-term one for white label at scale. Without the AASA there are no Universal
+Links either: a link to the host opens in Safari, not in the app.
+
+### Association files the host must serve (Universal Link path, `--callback https`)
 
 `generator/wellknown.mjs --project out/<slug> --team <Apple Team ID> --keystore ... --play-sha256 ...`
 writes `out/<slug>/wellknown/apple-app-site-association` and `assetlinks.json`, and with
@@ -94,16 +120,16 @@ writes `out/<slug>/wellknown/apple-app-site-association` and `assetlinks.json`, 
 the operator. The platform edge serves `/.well-known/<file>` of a host from the stable prefix of
 the host, `{deploys_path_prefix}hosts/{host}/.well-known/<file>`, the same place as its stable
 `index.html` ([mitra-terraform#1101](https://github.com/mitralab-dev/mitra-terraform/issues/1101),
-PR [#1102](https://github.com/mitralab-dev/mitra-terraform/pull/1102)). Nothing goes to the
-CloudFront KeyValueStore: it is at 60 percent of its hard ceiling and leaving the routing
-(mitra-terraform#1073), so a first version of this work that read a `mobile:<host>` key from it
-was dropped before the PR. On a host whose key still lives under a legacy host (alpha reads
-`.infusion-ai.cloud` through `.infusion.cloud`) the prefix is the legacy host: `--key-host` names
-it, and the printed `curl` tells which one answered. The code-studio does not write these files
-yet, and its publish prunes the host prefix of what it did not write, so on a host it already
-manages the operator copy lasts until the next routing event; the product step is the code-studio
-writing both files on publish. The Android fingerprints are the upload key (APK by adb) and the
-Play App Signing key (store installs); both are listed for Bolo.
+PR [#1102](https://github.com/mitralab-dev/mitra-terraform/pull/1102), draft while the scheme path
+is tested). Nothing goes to the CloudFront KeyValueStore: it is at 60 percent of its hard ceiling and
+leaving the routing (mitra-terraform#1073), so a first version of this work that read a
+`mobile:<host>` key from it was dropped before the PR. On a host whose key still lives under a
+legacy host (alpha reads `.infusion-ai.cloud` through `.infusion.cloud`) the prefix is the legacy
+host: `--key-host` names it, and the printed `curl` tells which one answered. The code-studio does
+not write these files yet, and its publish prunes the host prefix of what it did not write, so on a
+host it already manages the operator copy lasts until the next routing event; the product step is
+the code-studio writing both files on publish. The Android fingerprints are the upload key (APK by
+adb) and the Play App Signing key (store installs); both are listed for Bolo.
 
 Still manual, by design of the stores: the app record in App Store Connect (no public create-app
 endpoint), the app and its first AAB in Play Console, and the Play service account key
