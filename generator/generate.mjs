@@ -79,8 +79,12 @@ const callbackScheme = callback === "scheme" ? appId.toLowerCase() : undefined;
 // (iOS) so the return lands in the WebView. The platform API host is where the SDK redirect
 // starts; the providers are where it continues.
 const DEFAULT_AUTH_HOSTS = ["accounts.google.com", "login.microsoftonline.com", "login.live.com", "appleid.apple.com"];
+// The auth page the SDK starts on is named by the published page itself (window.__mitraEnv.authPageUrl)
+// and is not always on the API host: the Infusion brand serves it from app.infusion.cloud.
+const authPageHost = (page.match(/"authPageUrl"\s*:\s*"(https?:\/\/[^"\/]+)/) || [])[1];
 const authHosts = [...new Set([
   new URL(apiBase).host,
+  ...(authPageHost ? [new URL(authPageHost).host] : []),
   ...(descriptor.authHosts || []),
   ...String(flags["auth-hosts"] || "").split(",").map((s) => s.trim()).filter(Boolean),
   ...DEFAULT_AUTH_HOSTS
