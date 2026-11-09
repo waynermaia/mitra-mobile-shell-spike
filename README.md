@@ -88,6 +88,13 @@ old one (system browser).
 
 ### Sign-in return without touching the platform (2026-11-09, default)
 
+Proved on the Android emulator on 2026-11-09 with Bolo: App Link denied on purpose, Google sign-in
+started in the shell, Chrome ran the auth page, the app page bounced the fragment to
+`cloud.infusion.bolomobilespike://auth`, `MainActivity` loaded the app host with the fragment and
+the SDK closed the sign-in in the WebView, no console error. With the App Link approved the old
+path still closes it, so the two doors coexist. iOS: TestFlight build from the same generator, to
+be tapped on a device.
+
 The shell no longer needs anything served on the app host. `--callback scheme` (the default) makes
 the iOS sign-in session end on a URL scheme named after the app id (`cloud.infusion.bolomobilespike://`)
 and registers the same scheme on Android, next to the App Link. Who navigates to the scheme is the
