@@ -18,6 +18,10 @@ on:
         description: "TestFlight group name (with build)"
         type: string
         default: ""
+      expire:
+        description: "Build number to expire in TestFlight"
+        type: string
+        default: ""
 
 jobs:
   tools:
@@ -29,6 +33,7 @@ jobs:
       BUNDLE_ID: ${{ inputs.bundle_id }}
       BUILD: ${{ inputs.build }}
       GROUP: ${{ inputs.group }}
+      EXPIRE: ${{ inputs.expire }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -41,3 +46,6 @@ jobs:
       - name: Add the build to the group
         if: ${{ inputs.build != '' && inputs.group != '' }}
         run: node generator/asc.mjs add-to-group --bundle-id "$BUNDLE_ID" --build "$BUILD" --group "$GROUP"
+      - name: Expire the build
+        if: ${{ inputs.expire != '' }}
+        run: node generator/asc.mjs expire-build --bundle-id "$BUNDLE_ID" --build "$EXPIRE"

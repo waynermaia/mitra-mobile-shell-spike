@@ -6,6 +6,7 @@
 //   node generator/asc.mjs next-build --bundle-id cloud.x.y [--fallback N]
 //   node generator/asc.mjs wait-build --bundle-id cloud.x.y --build N [--timeout-minutes 20]
 //   node generator/asc.mjs add-to-group --bundle-id cloud.x.y --build N --group "Group Name"
+//   node generator/asc.mjs expire-build --bundle-id cloud.x.y --build N
 //   node generator/asc.mjs info --bundle-id cloud.x.y
 //   node generator/asc.mjs builds --bundle-id cloud.x.y
 //   node generator/asc.mjs selftest
@@ -209,6 +210,21 @@ const commands = {
       console.error(`[asc] "${group}" is an internal group: it receives every build automatically`);
     }
     console.log(JSON.stringify({ group: g.id, build: b.id }));
+  },
+
+  // Expire a build number in TestFlight (every build carrying it, when an upload was repeated),
+  // so testers stop seeing a binary that should not be installed.
+  async "expire-build"({ "bundle-id": bundleId, build }) {
+    need({ bundleId, build });
+    const app = requireApp(await findApp(bundleId), bundleId);
+    const r = await api("GET", `/v1/builds?filter[app]=${app.id}&filter[version]=${encodeURIComponent(build)}&fields[builds]=version,expired`);
+    const targets = r.data.filter((b) => String(b.attributes.version) === String(build) && !b.attributes.expired);
+    if (targets.length === 0) fail(`no unexpired build ${build} for ${bundleId}`);
+    for (const b of targets) {
+      await api("PATCH", `/v1/builds/${b.id}`, { data: { type: "builds", id: b.id, attributes: { expired: true } } });
+      console.error(`[asc] build ${build} (${b.id}) expired`);
+    }
+    console.log(JSON.stringify({ build, expired: targets.map((b) => b.id) }));
   },
 
   // Every build the API lists for the app, newest first: what next-build chooses from.
