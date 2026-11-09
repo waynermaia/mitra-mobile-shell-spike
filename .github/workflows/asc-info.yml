@@ -18,6 +18,10 @@ on:
         description: "TestFlight group name (with build)"
         type: string
         default: ""
+      copy_testers_from:
+        description: "Bundle id whose internal TestFlight testers are copied to bundle_id"
+        type: string
+        default: ""
       expire:
         description: "Build number to expire in TestFlight"
         type: string
@@ -34,6 +38,7 @@ jobs:
       BUILD: ${{ inputs.build }}
       GROUP: ${{ inputs.group }}
       EXPIRE: ${{ inputs.expire }}
+      COPY_FROM: ${{ inputs.copy_testers_from }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -49,3 +54,6 @@ jobs:
       - name: Expire the build
         if: ${{ inputs.expire != '' }}
         run: node generator/asc.mjs expire-build --bundle-id "$BUNDLE_ID" --build "$EXPIRE"
+      - name: Copy the internal testers
+        if: ${{ inputs.copy_testers_from != '' }}
+        run: node generator/asc.mjs copy-internal-testers --bundle-id "$BUNDLE_ID" --from "$COPY_FROM"

@@ -212,6 +212,32 @@ const commands = {
     console.log(JSON.stringify({ group: g.id, build: b.id }));
   },
 
+  // A new app has no testers: TestFlight groups are per app. Mirror the internal groups of an app
+  // that already has them (name and testers), so the same people see the new app's builds. An
+  // internal group with access to all builds receives every processed build by itself.
+  async "copy-internal-testers"({ "bundle-id": bundleId, from }) {
+    need({ bundleId, from });
+    const app = requireApp(await findApp(bundleId), bundleId);
+    const source = requireApp(await findApp(from), from);
+    const mine = await betaGroups(app.id);
+    const out = [];
+    for (const g of (await betaGroups(source.id)).filter((x) => x.attributes.isInternalGroup)) {
+      const testers = (await api("GET", `/v1/betaGroups/${g.id}/betaTesters?limit=200&fields[betaTesters]=email`)).data;
+      let target = mine.find((x) => x.attributes.name === g.attributes.name);
+      if (!target) {
+        target = (await api("POST", "/v1/betaGroups", {
+          data: { type: "betaGroups", attributes: { name: g.attributes.name, isInternalGroup: true, hasAccessToAllBuilds: true }, relationships: { app: { data: { type: "apps", id: app.id } } } },
+        })).data;
+      }
+      if (testers.length > 0) {
+        await api("POST", `/v1/betaGroups/${target.id}/relationships/betaTesters`, { data: testers.map((t) => ({ type: "betaTesters", id: t.id })) }, { allow: [409] });
+      }
+      out.push({ group: g.attributes.name, testers: testers.length });
+    }
+    if (out.length === 0) fail(`${from} has no internal TestFlight group to copy`);
+    console.log(JSON.stringify(out));
+  },
+
   // Expire a build number in TestFlight (every build carrying it, when an upload was repeated),
   // so testers stop seeing a binary that should not be installed.
   async "expire-build"({ "bundle-id": bundleId, build }) {
