@@ -200,8 +200,14 @@ const commands = {
       g = r.data;
       console.error(`[asc] created beta group "${group}" (${g.id})`);
     }
-    const r = await api("POST", `/v1/betaGroups/${g.id}/relationships/builds`, { data: [{ type: "builds", id: b.id }] }, { allow: [409] });
+    const r = await api("POST", `/v1/betaGroups/${g.id}/relationships/builds`, { data: [{ type: "builds", id: b.id }] }, { allow: [409, 422] });
     if (r && r.status === 409 && !/already/i.test(r.errorText)) throw new Error(`adding build to group -> 409: ${r.errorText.slice(0, 600)}`);
+    if (r && r.status === 422) {
+      // An internal group (App Store Connect users) receives every processed build by itself and
+      // refuses explicit assignment; nothing to do.
+      if (!/internal group/i.test(r.errorText)) throw new Error(`adding build to group -> 422: ${r.errorText.slice(0, 600)}`);
+      console.error(`[asc] "${group}" is an internal group: it receives every build automatically`);
+    }
     console.log(JSON.stringify({ group: g.id, build: b.id }));
   },
 
