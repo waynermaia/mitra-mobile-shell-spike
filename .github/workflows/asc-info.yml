@@ -1,0 +1,26 @@
+name: ASC info
+
+# Diagnostic: what App Store Connect returns for an app (record, latest build, groups). Read only.
+
+on:
+  workflow_dispatch:
+    inputs:
+      bundle_id:
+        description: "Bundle id to inspect"
+        type: string
+        default: "cloud.infusion.bolomobilespike"
+
+jobs:
+  info:
+    runs-on: ${{ vars.LINUX_RUNNER || 'ubuntu-latest' }}
+    env:
+      ASC_KEY_ID: ${{ secrets.ASC_KEY_ID }}
+      ASC_ISSUER_ID: ${{ secrets.ASC_ISSUER_ID }}
+      ASC_KEY_P8_B64: ${{ secrets.ASC_KEY_P8_B64 }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: node generator/asc.mjs info --bundle-id "${{ inputs.bundle_id }}" --verbose
+      - run: node generator/asc.mjs next-build --bundle-id "${{ inputs.bundle_id }}" --fallback 999 --verbose
