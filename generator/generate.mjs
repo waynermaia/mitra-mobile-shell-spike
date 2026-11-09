@@ -6,8 +6,8 @@
 //   node generator/generate.mjs --descriptor apps/bolo.json [flags override the file]
 //
 //   flags: [--name "..."] [--app-id x.y.z] [--icon <file|url>] [--theme "#0f172a"] [--version 1.0]
-//          [--build-number 1] [--associated-domains] [--out out] [--build debug|release] [--install]
-//          [--no-ios] [--debug] [--verbose]
+//          [--build-number 1] [--associated-domains] [--auth-hosts a.com,b.com] [--out out]
+//          [--build debug|release] [--install] [--no-ios] [--debug] [--verbose] [--identity]
 //
 // Source of truth for the identity is the platform: GET {api}/code-studio/api/v1/apps/{app}/info
 // (public, no token) gives name, published origins, accent color and the login logo. The page
@@ -15,7 +15,8 @@
 // logo, title and theme-color in --url mode). Then it writes package.json +
 // capacitor.config.json + www/ + assets/, npm ci,
 // cap add android/ios, apply the patches the spike proved (App Link intent-filter, onNewIntent
-// in MainActivity, release signing from env, exempt encryption, optional Associated Domains),
+// in MainActivity, release signing from env, exempt encryption, optional Associated Domains,
+// SceneDelegate with the sign-in session and Universal Link handling on iOS),
 // generate icons and splash, cap sync, copy the CI workflow. Optionally builds and installs
 // the Android APK on the connected device or emulator.
 
@@ -62,6 +63,16 @@ const buildNumber = Number(flags["build-number"] || descriptor.buildNumber || 1)
 const associatedDomains = Boolean(flags["associated-domains"] || descriptor.associatedDomains);
 const iconSource = flags.icon || descriptor.icon || info?.logoUrl || scraped.icon;
 const host = new URL(url).host;
+// Hosts whose top-level navigation is a sign-in: the shell opens them in a native auth session
+// (iOS) so the return lands in the WebView. The platform API host is where the SDK redirect
+// starts; the providers are where it continues.
+const DEFAULT_AUTH_HOSTS = ["accounts.google.com", "login.microsoftonline.com", "login.live.com", "appleid.apple.com"];
+const authHosts = [...new Set([
+  new URL(apiBase).host,
+  ...(descriptor.authHosts || []),
+  ...String(flags["auth-hosts"] || "").split(",").map((s) => s.trim()).filter(Boolean),
+  ...DEFAULT_AUTH_HOSTS
+].map((h) => h.toLowerCase()))];
 const projectDir = join(outRoot, slug);
 
 validateAppId(appId);
@@ -73,6 +84,15 @@ log(`url      ${url}`);
 log(`theme    ${themeColor}`);
 log(`icon     ${iconSource ? describe(iconSource) : "(none, falling back to the template logo)"}`);
 log(`out      ${projectDir}`);
+
+// --identity: resolve and print the identity only (CI uses it to ask App Store Connect for the
+// next build number before generating, since the bundle id derives from the app name).
+if (flags.identity) {
+  const identity = { slug, appName, appId, url, host, authHosts };
+  console.log(JSON.stringify(identity));
+  githubOutputs(identity);
+  process.exit(0);
+}
 
 // ---------- 2. Scaffold the web side ----------
 if (existsSync(projectDir)) {
@@ -109,7 +129,8 @@ writeJson(join(projectDir, "capacitor.config.json"), {
   android: { allowMixedContent: false, webContentsDebuggingEnabled: Boolean(flags.debug || descriptor.debug) },
   plugins: {
     SplashScreen: { launchShowDuration: 1500, launchAutoHide: true, backgroundColor: themeColor, showSpinner: false },
-    StatusBar: { style: isDark(themeColor) ? "DARK" : "LIGHT", backgroundColor: themeColor }
+    StatusBar: { style: isDark(themeColor) ? "DARK" : "LIGHT", backgroundColor: themeColor },
+    MitraShell: { authHosts }
   }
 });
 
@@ -122,7 +143,7 @@ log(`logo     ${logoPath}`);
 // Descriptor echo, so the generated project is reproducible from itself.
 writeJson(join(projectDir, "mitra-shell.json"), {
   app: appUuid, api: appUuid ? apiBase : undefined,
-  url, name: appName, appId, themeColor, version: versionName, buildNumber, associatedDomains,
+  url, name: appName, appId, themeColor, version: versionName, buildNumber, associatedDomains, authHosts,
   icon: iconSource && !String(iconSource).startsWith("data:") ? iconSource : undefined,
   generatedAt: new Date().toISOString()
 });
@@ -137,6 +158,7 @@ patchAndroid(projectDir, { appId, host, versionName, buildNumber });
 
 // ---------- 5. iOS patches ----------
 if (wantIos) patchIos(projectDir, { appId, host, versionName, buildNumber, associatedDomains });
+if (wantIos) log(`ios      SceneDelegate with sign-in session for ${authHosts.join(", ")}`);
 
 // ---------- 6. Assets, sync, CI ----------
 run("npm", ["run", "assets"], projectDir);
@@ -162,10 +184,7 @@ if (build) {
 // Machine-readable summary for the caller (CI reads it to name artifacts and find the project).
 const summary = { slug, appName, appId, url, host, projectDir, apk };
 writeJson(join(outRoot, "last.json"), summary);
-if (process.env.GITHUB_OUTPUT) {
-  writeFileSync(process.env.GITHUB_OUTPUT, Object.entries(summary).filter(([, v]) => v !== undefined)
-    .map(([k, v]) => `${k.replace(/[A-Z]/g, (c) => "_" + c.toLowerCase())}=${v}\n`).join(""), { flag: "a" });
-}
+githubOutputs(summary);
 log("done");
 
 // ======================================================================
@@ -291,9 +310,14 @@ function patchIos(dir, { appId, host, versionName, buildNumber, associatedDomain
            .replace(/CURRENT_PROJECT_VERSION = [^;]+;/g, `CURRENT_PROJECT_VERSION = ${buildNumber};`);
   if (!pbx.includes(`PRODUCT_BUNDLE_IDENTIFIER = ${appId};`)) fail("cap add ios did not set the bundle id");
 
+  // The SceneDelegate the template ships: Universal Links loaded in the WebView and the sign-in
+  // session for the identity hosts (see generator/templates/ios/SceneDelegate.swift).
+  cpSync(join(here, "templates", "ios", "SceneDelegate.swift"), join(appDir, "SceneDelegate.swift"));
+
   if (associatedDomains) {
-    // Universal Link for the published host. Only useful once the platform serves
-    // /.well-known/apple-app-site-association on that host; harmless before that.
+    // Universal Link and the https callback of the sign-in session, both on the published host.
+    // Only useful once the platform serves /.well-known/apple-app-site-association on that
+    // host (KVS key mobile:<host>, see generator/wellknown.mjs); harmless before that.
     writeFileSync(join(appDir, "App.entitlements"), `<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -301,6 +325,7 @@ function patchIos(dir, { appId, host, versionName, buildNumber, associatedDomain
 	<key>com.apple.developer.associated-domains</key>
 	<array>
 		<string>applinks:${host}</string>
+		<string>webcredentials:${host}</string>
 	</array>
 </dict>
 </plist>
@@ -385,7 +410,8 @@ Generated by \`mitra-mobile-shell-spike/generator\` from ${url}. Do not edit by 
 - Loads: ${url}
 - Android: App Link intent-filter for the host, \`onNewIntent\` hands sign-in returns to the WebView,
   release signing from \`ANDROID_KEYSTORE_PATH\`, \`KEYSTORE_PASSWORD\`, \`KEY_ALIAS\`, \`KEY_PASSWORD\`.
-- iOS: exempt encryption declared; Associated Domains ${associatedDomains ? "ON (applinks:" + new URL(url).host + ")" : "off (pass --associated-domains once the host serves the AASA file)"}.
+- iOS: exempt encryption declared; SceneDelegate opens sign-in hosts in an ASWebAuthenticationSession
+  with the app host as callback and loads Universal Links in the WebView; Associated Domains ${associatedDomains ? "ON (applinks and webcredentials for " + new URL(url).host + ")" : "off (pass --associated-domains once the host serves the AASA file)"}.
 - CI: \`.github/workflows/mobile.yml\` (same secrets as the spike: Android keystore, App Store Connect API key).
 
 \`\`\`bash
@@ -463,6 +489,11 @@ function findApk(dir) {
   const apk = existsSync(dir) ? readdirSync(dir).find((f) => f.endsWith(".apk")) : undefined;
   if (!apk) fail(`No APK under ${dir}`);
   return join(dir, apk);
+}
+function githubOutputs(obj) {
+  if (!process.env.GITHUB_OUTPUT) return;
+  writeFileSync(process.env.GITHUB_OUTPUT, Object.entries(obj).filter(([, v]) => v !== undefined && !Array.isArray(v))
+    .map(([k, v]) => `${k.replace(/[A-Z]/g, (c) => "_" + c.toLowerCase())}=${v}\n`).join(""), { flag: "a" });
 }
 function log(msg) { console.log(`[generate] ${msg}`); }
 function fail(msg) { console.error(`[generate] ERROR: ${msg}`); process.exit(1); }
