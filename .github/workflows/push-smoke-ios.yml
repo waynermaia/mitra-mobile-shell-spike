@@ -85,7 +85,8 @@ jobs:
           xcrun simctl install "$UDID" "$RUNNER_TEMP/dd/Build/Products/Debug-iphonesimulator/App.app"
           # The permission dialog cannot be tapped from a script; this writes the same answer.
           echo "simulator $UDID, app installed"
-          (brew tap wix/brew && HOMEBREW_NO_AUTO_UPDATE=1 brew install applesimutils) 2>&1 | tail -5
+          # applesimutils is the simulator tool of the Detox project (wix); the runner is thrown away after the job.
+          (brew tap wix/brew && brew trust wix/brew && HOMEBREW_NO_AUTO_UPDATE=1 brew install applesimutils) 2>&1 | tail -5
           applesimutils --byId "$UDID" --bundle "$BUNDLE" --setPermissions notifications=YES 2>&1 | tail -5
           mkdir -p "$RUNNER_TEMP/evidence"
           xcrun simctl launch --console-pty "$UDID" "$BUNDLE" > "$RUNNER_TEMP/evidence/app.log" 2>&1 &
