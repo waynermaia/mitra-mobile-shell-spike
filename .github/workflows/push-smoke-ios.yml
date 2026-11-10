@@ -84,8 +84,9 @@ jobs:
           xcrun simctl bootstatus "$UDID" -b | tail -2
           xcrun simctl install "$UDID" "$RUNNER_TEMP/dd/Build/Products/Debug-iphonesimulator/App.app"
           # The permission dialog cannot be tapped from a script; this writes the same answer.
-          brew tap wix/brew >/dev/null 2>&1 && brew install applesimutils >/dev/null 2>&1
-          applesimutils --byId "$UDID" --bundle "$BUNDLE" --setPermissions notifications=YES
+          echo "simulator $UDID, app installed"
+          (brew tap wix/brew && HOMEBREW_NO_AUTO_UPDATE=1 brew install applesimutils) 2>&1 | tail -5
+          applesimutils --byId "$UDID" --bundle "$BUNDLE" --setPermissions notifications=YES 2>&1 | tail -5
           mkdir -p "$RUNNER_TEMP/evidence"
           xcrun simctl launch --console-pty "$UDID" "$BUNDLE" > "$RUNNER_TEMP/evidence/app.log" 2>&1 &
           sleep 20
