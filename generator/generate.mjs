@@ -8,7 +8,7 @@
 //   flags: [--name "..."] [--app-id x.y.z] [--icon <file|url>] [--theme "#0f172a"] [--version 1.0]
 //          [--build-number 1] [--associated-domains] [--auth-hosts a.com,b.com] [--out out]
 //          [--callback scheme|https] [--build debug|release] [--install] [--no-ios] [--debug]
-//          [--verbose] [--identity]
+//          [--verbose] [--identity] [--push] [--google-services <google-services.json>]
 //
 // Source of truth for the identity is the platform: GET {api}/code-studio/api/v1/apps/{app}/info
 // (public, no token) gives name, published origins, accent color and the login logo. The page
@@ -27,6 +27,12 @@
 // bounces the fragment to the scheme (the snippet in app-snippet/, which the app must include).
 // "https" is the Universal Link callback, which needs the host to serve the
 // apple-app-site-association file (mitra-terraform#1101) and --associated-domains.
+//
+// Push (--push): off by default, and then the push plugin is left out of the native projects, so a
+// page that calls it gets "not implemented". iOS needs only the flag (aps-environment entitlement
+// and the AppDelegate hooks). Android also needs the Firebase config of this application id
+// (--google-services or GOOGLE_SERVICES_JSON_B64); without it Android is built without the plugin,
+// because the plugin crashes the app on register() when Firebase is not configured.
 
 import { execFileSync, spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, writeFileSync, cpSync, readdirSync, rmSync } from "node:fs";
@@ -71,6 +77,7 @@ const buildNumber = Number(flags["build-number"] || descriptor.buildNumber || 1)
 const associatedDomains = Boolean(flags["associated-domains"] || descriptor.associatedDomains);
 const callback = String(flags.callback || descriptor.callback || "scheme");
 if (!["scheme", "https"].includes(callback)) fail(`--callback must be scheme or https, got ${callback}`);
+const wantPush = Boolean(flags.push || descriptor.push);
 const iconSource = flags.icon || descriptor.icon || info?.logoUrl || scraped.icon;
 const host = new URL(url).host;
 // A bundle id is a valid URL scheme (letters, digits, dot, hyphen), unique per app on the device.
@@ -92,6 +99,9 @@ const authHosts = [...new Set([
 const projectDir = join(outRoot, slug);
 
 validateAppId(appId);
+const googleServices = wantPush ? readGoogleServices(appId) : null;
+const pushIos = wantPush && wantIos;
+const pushAndroid = Boolean(googleServices);
 if (info) log(`source   ${apiBase}/code-studio/api/v1/apps/${appUuid}/info (origins: ${info.origins.join(", ")})`);
 log(`app      ${appName}`);
 log(`slug     ${slug}`);
@@ -99,12 +109,13 @@ log(`appId    ${appId}`);
 log(`url      ${url}`);
 log(`theme    ${themeColor}`);
 log(`icon     ${iconSource ? describe(iconSource) : "(none, falling back to the template logo)"}`);
+log(`push     ${wantPush ? `ios ${pushIos ? "on" : "off"}, android ${pushAndroid ? "on" : "off (no Firebase config for " + appId + ")"}` : "off"}`);
 log(`out      ${projectDir}`);
 
 // --identity: resolve and print the identity only (CI uses it to ask App Store Connect for the
 // next build number before generating, since the bundle id derives from the app name).
 if (flags.identity) {
-  const identity = { slug, appName, appId, url, host, authHosts, callback, callbackScheme };
+  const identity = { slug, appName, appId, url, host, authHosts, callback, callbackScheme, push: wantPush };
   console.log(JSON.stringify(identity));
   githubOutputs(identity);
   process.exit(0);
@@ -136,17 +147,26 @@ writeJson(join(projectDir, "package.json"), pkg);
 cpSync(join(templateRoot, "package-lock.json"), join(projectDir, "package-lock.json"));
 cpSync(join(templateRoot, ".gitignore"), join(projectDir, ".gitignore"));
 
+// The published page is not ours, so a plugin is in a platform only when that platform is ready
+// for it: the push plugin crashes Android on register() without Firebase, and on iOS it would
+// ship code for an entitlement the app does not have.
+const PUSH_PLUGIN = "@capacitor/push-notifications";
+const capPlugins = Object.keys(templatePkg.dependencies)
+  .filter((d) => d.startsWith("@capacitor/") && !["android", "ios", "core", "cli", "assets"].includes(d.split("/")[1]));
+const pluginsFor = (push) => capPlugins.filter((d) => push || d !== PUSH_PLUGIN);
+
 writeJson(join(projectDir, "capacitor.config.json"), {
   appId,
   appName,
   webDir: "www",
   server: { url, cleartext: false },
-  ios: { contentInset: "automatic" },
-  android: { allowMixedContent: false, webContentsDebuggingEnabled: Boolean(flags.debug || descriptor.debug) },
+  ios: { contentInset: "automatic", includePlugins: pluginsFor(pushIos) },
+  android: { allowMixedContent: false, webContentsDebuggingEnabled: Boolean(flags.debug || descriptor.debug), includePlugins: pluginsFor(pushAndroid) },
   plugins: {
     SplashScreen: { launchShowDuration: 1500, launchAutoHide: true, backgroundColor: themeColor, showSpinner: false },
     StatusBar: { style: isDark(themeColor) ? "DARK" : "LIGHT", backgroundColor: themeColor },
-    MitraShell: { authHosts, ...(callbackScheme ? { callbackScheme } : {}) }
+    MitraShell: { authHosts, ...(callbackScheme ? { callbackScheme } : {}) },
+    ...(wantPush ? { PushNotifications: { presentationOptions: ["badge", "sound", "alert"] } } : {})
   }
 });
 
@@ -160,6 +180,7 @@ log(`logo     ${logoPath}`);
 writeJson(join(projectDir, "mitra-shell.json"), {
   app: appUuid, api: appUuid ? apiBase : undefined,
   url, name: appName, appId, themeColor, version: versionName, buildNumber, associatedDomains, authHosts, callback,
+  push: wantPush ? { ios: pushIos, android: pushAndroid } : false,
   icon: iconSource && !String(iconSource).startsWith("data:") ? iconSource : undefined,
   generatedAt: new Date().toISOString()
 });
@@ -170,10 +191,10 @@ run("npx", ["cap", "add", "android"], projectDir);
 if (wantIos) run("npx", ["cap", "add", "ios"], projectDir);
 
 // ---------- 4. Android patches ----------
-patchAndroid(projectDir, { appId, host, versionName, buildNumber, callbackScheme });
+patchAndroid(projectDir, { appId, host, versionName, buildNumber, callbackScheme, googleServices });
 
 // ---------- 5. iOS patches ----------
-if (wantIos) patchIos(projectDir, { appId, host, versionName, buildNumber, associatedDomains, callbackScheme });
+if (wantIos) patchIos(projectDir, { appId, host, versionName, buildNumber, associatedDomains, callbackScheme, push: pushIos });
 if (wantIos) log(`ios      SceneDelegate with sign-in session for ${authHosts.join(", ")}, callback ${callbackScheme ? callbackScheme + "://" : "https://" + host + "/"}`);
 
 // ---------- 6. Assets, sync, CI ----------
@@ -181,7 +202,12 @@ run("npm", ["run", "assets"], projectDir);
 run("npx", ["cap", "sync"], projectDir);
 mkdirSync(join(projectDir, ".github", "workflows"), { recursive: true });
 cpSync(join(templateRoot, ".github", "workflows", "mobile.yml"), join(projectDir, ".github", "workflows", "mobile.yml"));
-writeFileSync(join(projectDir, "README.md"), readme({ appName, appId, url, slug, associatedDomains, callbackScheme }));
+writeFileSync(join(projectDir, "README.md"), readme({ appName, appId, url, slug, associatedDomains, callbackScheme, pushIos, pushAndroid }));
+if (wantPush) {
+  mkdirSync(join(projectDir, "app-snippet"), { recursive: true });
+  writeFileSync(join(projectDir, "app-snippet", "push-example.html"), pushExampleSnippet());
+  log("snippet  app-snippet/push-example.html (how the app page asks for the push token)");
+}
 
 // What the published app itself has to carry for the return by scheme: the snippet for the head
 // of its index.html (the host serves nothing for the shell). The assetlinks.json Android reads
@@ -207,7 +233,7 @@ if (build) {
 }
 
 // Machine-readable summary for the caller (CI reads it to name artifacts and find the project).
-const summary = { slug, appName, appId, url, host, projectDir, apk };
+const summary = { slug, appName, appId, url, host, projectDir, apk, pushIos, pushAndroid };
 writeJson(join(outRoot, "last.json"), summary);
 githubOutputs(summary);
 log("done");
@@ -258,7 +284,7 @@ async function materializeIcon(source, baseUrl, assetsDir) {
   return target;
 }
 
-function patchAndroid(dir, { appId, host, versionName, buildNumber, callbackScheme }) {
+function patchAndroid(dir, { appId, host, versionName, buildNumber, callbackScheme, googleServices }) {
   const app = join(dir, "android", "app");
 
   // Manifest: App Link for the published host, so the sign-in that ends on this host comes
@@ -282,6 +308,15 @@ function patchAndroid(dir, { appId, host, versionName, buildNumber, callbackSche
             </intent-filter>` : ""}
         </activity>`;
   manifest = manifest.replace(/\s*<\/activity>/, filter);
+  if (googleServices) {
+    // Android 13+ shows a notification only with this permission, which the page asks for with
+    // PushNotifications.requestPermissions().
+    manifest = manifest.replace(/(\s*)<uses-permission android:name="android.permission.INTERNET" \/>/,
+      `$&$1<uses-permission android:name="android.permission.POST_NOTIFICATIONS" />`);
+    if (!manifest.includes("POST_NOTIFICATIONS")) fail("AndroidManifest layout changed, the notification permission was not added");
+    // The Capacitor template applies the google-services Gradle plugin when this file exists.
+    writeFileSync(join(app, "google-services.json"), googleServices);
+  }
   writeFileSync(manifestPath, manifest);
 
   // MainActivity: load the incoming link in the WebView (proved on the emulator in the spike).
@@ -327,7 +362,7 @@ function patchAndroid(dir, { appId, host, versionName, buildNumber, callbackSche
   if (sdk) writeFileSync(join(dir, "android", "local.properties"), `sdk.dir=${sdk}\n`);
 }
 
-function patchIos(dir, { appId, host, versionName, buildNumber, associatedDomains, callbackScheme }) {
+function patchIos(dir, { appId, host, versionName, buildNumber, associatedDomains, callbackScheme, push }) {
   const appDir = join(dir, "ios", "App", "App");
   const plistPath = join(appDir, "Info.plist");
   let plist = readFileSync(plistPath, "utf8");
@@ -362,24 +397,49 @@ function patchIos(dir, { appId, host, versionName, buildNumber, associatedDomain
   // session for the identity hosts (see generator/templates/ios/SceneDelegate.swift).
   cpSync(join(here, "templates", "ios", "SceneDelegate.swift"), join(appDir, "SceneDelegate.swift"));
 
-  if (associatedDomains) {
-    // Universal Link and the https callback of the sign-in session, both on the published host.
-    // Only useful once the platform serves /.well-known/apple-app-site-association on that
-    // host (KVS key mobile:<host>, see generator/wellknown.mjs); harmless before that.
+  // Universal Link and the https callback of the sign-in session, both on the published host:
+  // only useful once the host serves /.well-known/apple-app-site-association, harmless before.
+  // Push: Xcode switches aps-environment to production when it signs for the App Store.
+  const entitlements = [
+    ...(push ? ["\t<key>aps-environment</key>\n\t<string>development</string>"] : []),
+    ...(associatedDomains ? [`\t<key>com.apple.developer.associated-domains</key>
+\t<array>
+\t\t<string>applinks:${host}</string>
+\t\t<string>webcredentials:${host}</string>
+\t</array>`] : [])
+  ];
+  if (entitlements.length) {
     writeFileSync(join(appDir, "App.entitlements"), `<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-	<key>com.apple.developer.associated-domains</key>
-	<array>
-		<string>applinks:${host}</string>
-		<string>webcredentials:${host}</string>
-	</array>
+${entitlements.join("\n")}
 </dict>
 </plist>
 `);
     pbx = pbx.replace(new RegExp(`(\\t+)PRODUCT_BUNDLE_IDENTIFIER = ${appId.replace(/\./g, "\\.")};`, "g"),
       `$1CODE_SIGN_ENTITLEMENTS = App/App.entitlements;\n$1PRODUCT_BUNDLE_IDENTIFIER = ${appId};`);
+  }
+  if (push) {
+    // The push plugin learns the device token (or the failure) from these two AppDelegate calls.
+    const delegatePath = join(appDir, "AppDelegate.swift");
+    let delegate = readFileSync(delegatePath, "utf8");
+    if (!delegate.includes("capacitorDidRegisterForRemoteNotifications")) {
+      const hooks = `
+    func application(_ application: UIApplication, didRegisterForRemoteNotificationsWithDeviceToken deviceToken: Data) {
+        NotificationCenter.default.post(name: .capacitorDidRegisterForRemoteNotifications, object: deviceToken)
+    }
+
+    func application(_ application: UIApplication, didFailToRegisterForRemoteNotificationsWithError error: Error) {
+        NotificationCenter.default.post(name: .capacitorDidFailToRegisterForRemoteNotifications, object: error)
+    }
+}
+`;
+      const end = delegate.lastIndexOf("}");
+      if (end === -1) fail("AppDelegate.swift layout changed, the push hooks were not added");
+      delegate = delegate.slice(0, end).replace(/\s*$/, "\n") + hooks;
+      writeFileSync(delegatePath, delegate);
+    }
   }
   writeFileSync(pbxPath, pbx);
 }
@@ -466,6 +526,42 @@ function shellReturnSnippet(scheme) {
 `;
 }
 
+// What the published app does to receive push. It is Capacitor's own plugin API, reached through
+// the bridge the shell injects in the page, so the app needs no dependency.
+function pushExampleSnippet() {
+  return `<script>
+// Call from a user action (a button), never at page load: iOS shows the permission dialog once.
+async function enablePush(onToken, onNotification, onOpened) {
+  var cap = window.Capacitor;
+  var push = cap && cap.isNativePlatform && cap.isNativePlatform() && cap.Plugins && cap.Plugins.PushNotifications;
+  if (!push) return "unavailable";                        // plain browser, or a shell built without push
+  push.addListener("registration", function (t) { onToken(t.value, cap.getPlatform()); });   // send to your backend with the signed-in user
+  push.addListener("registrationError", function (e) { console.warn("push registration failed", e); });
+  push.addListener("pushNotificationReceived", function (n) { if (onNotification) onNotification(n); });           // app in foreground
+  push.addListener("pushNotificationActionPerformed", function (a) { if (onOpened) onOpened(a.notification); });   // user tapped it
+  var perm = await push.requestPermissions();
+  if (perm.receive !== "granted") return "denied";
+  try { await push.register(); } catch (e) { return "unavailable"; }
+  return "granted";
+}
+</script>
+`;
+}
+
+function readGoogleServices(appId) {
+  const raw = flags["google-services"] ? readFileSync(resolve(String(flags["google-services"])), "utf8")
+    : descriptor.googleServices ? readFileSync(resolve(String(descriptor.googleServices)), "utf8")
+    : process.env.GOOGLE_SERVICES_JSON_B64 ? Buffer.from(process.env.GOOGLE_SERVICES_JSON_B64, "base64").toString("utf8")
+    : null;
+  if (!raw) return null;
+  let json;
+  try { json = JSON.parse(raw); } catch { fail("The Firebase config (google-services.json) is not valid JSON"); }
+  const packages = (json.client || []).map((c) => c.client_info?.android_client_info?.package_name);
+  // Gradle would fail later with "No matching client found"; say it here, with the fix.
+  if (!packages.includes(appId)) fail(`The Firebase config has no Android app for ${appId} (it has: ${packages.join(", ") || "none"}). Register the app in the Firebase project and download the config again.`);
+  return raw;
+}
+
 function offlinePage(name, color) {
   const fg = isDark(color) ? "#e2e8f0" : "#0f172a";
   return `<!doctype html>
@@ -491,7 +587,7 @@ function offlinePage(name, color) {
 `;
 }
 
-function readme({ appName, appId, url, slug, associatedDomains, callbackScheme }) {
+function readme({ appName, appId, url, slug, associatedDomains, callbackScheme, pushIos, pushAndroid }) {
   return `# ${appName} (mobile shell)
 
 Generated by \`mitra-mobile-shell-spike/generator\` from ${url}. Do not edit by hand: change
@@ -507,6 +603,7 @@ Generated by \`mitra-mobile-shell-spike/generator\` from ${url}. Do not edit by 
   \`app-snippet/shell-return.html\` in the head of its index.html, and for Android App Links its
   \`public/.well-known/assetlinks.json\` (from \`generator/wellknown.mjs\`).` : `by https callback on the app host (Universal Link),
   which needs the host to serve the apple-app-site-association file.`}
+- Push: iOS ${pushIos ? "on (aps-environment entitlement, AppDelegate hooks)" : "off"}, Android ${pushAndroid ? "on (Firebase config in android/app/google-services.json, not to be committed)" : "off"}.${pushIos || pushAndroid ? " The page uses Capacitor's PushNotifications plugin through the bridge, see \`app-snippet/push-example.html\`." : ""}
 - CI: \`.github/workflows/mobile.yml\` (same secrets as the spike: Android keystore, App Store Connect API key).
 
 \`\`\`bash

@@ -1,0 +1,108 @@
+name: Push smoke test (iOS simulator)
+
+# Proves the iOS side of push without an APNs key or a device: the shell is generated with --push,
+# built for the simulator, and a notification is delivered with `simctl push`, which goes through
+# the same UNUserNotificationCenter path as a real one. The page under test is a local page that
+# calls the plugin the way a published app would and logs what it gets; the run fails when the
+# page does not receive the notification. Registration is logged but not asserted: a simulator in
+# a CI virtual machine may or may not get a device token.
+
+on:
+  workflow_dispatch:
+    inputs:
+      app:
+        description: "Platform app UUID used for the identity (name, bundle id)"
+        type: string
+        default: "a97a993f-9181-4865-b309-5797c3b9ca1e"
+      api:
+        description: "Platform API base URL"
+        type: string
+        default: "https://beta.mitralab.io"
+
+jobs:
+  ios-push:
+    runs-on: ${{ vars.MACOS_RUNNER || 'macos-26' }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - name: Generate the shell with push
+        id: gen
+        run: node generator/generate.mjs --app "${{ inputs.app }}" --api "${{ inputs.api }}" --push --verbose
+      - name: Swap the published page for the local test page
+        working-directory: ${{ steps.gen.outputs.project_dir }}
+        run: |
+          node -e '
+            const fs = require("fs");
+            const p = "ios/App/App/capacitor.config.json";
+            const c = JSON.parse(fs.readFileSync(p, "utf8"));
+            delete c.server;
+            fs.writeFileSync(p, JSON.stringify(c, null, 2));
+          '
+          cat > ios/App/App/public/index.html <<'EOF'
+          <!doctype html>
+          <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+          <body style="font:16px -apple-system;padding:60px 16px"><h3>Push smoke test</h3><pre id="out" style="white-space:pre-wrap"></pre>
+          <script>
+          function say(m) { console.log("PUSHTEST " + m); document.getElementById("out").textContent += m + "\n"; }
+          (async function () {
+            var push = window.Capacitor && Capacitor.Plugins && Capacitor.Plugins.PushNotifications;
+            if (!push) return say("no-plugin");
+            push.addListener("registration", function (t) { say("registration " + String(t.value).slice(0, 12)); });
+            push.addListener("registrationError", function (e) { say("registrationError " + JSON.stringify(e)); });
+            push.addListener("pushNotificationReceived", function (n) { say("received " + JSON.stringify({ title: n.title, body: n.body, data: n.data })); });
+            push.addListener("pushNotificationActionPerformed", function (a) { say("opened " + a.notification.id); });
+            say("permission " + JSON.stringify(await push.checkPermissions()));
+            try { await push.register(); say("register-called"); } catch (e) { say("register-threw " + e.message); }
+          })();
+          </script>
+          EOF
+      - name: Build for the simulator
+        working-directory: ${{ steps.gen.outputs.project_dir }}
+        run: |
+          set -o pipefail
+          xcodebuild -project ios/App/App.xcodeproj -scheme App -configuration Debug \
+            -sdk iphonesimulator -destination 'generic/platform=iOS Simulator' \
+            -derivedDataPath "$RUNNER_TEMP/dd" build | tail -15
+          ls "$RUNNER_TEMP/dd/Build/Products/Debug-iphonesimulator/"
+      - name: Boot a simulator, allow notifications, deliver one
+        env:
+          BUNDLE: ${{ steps.gen.outputs.app_id }}
+        run: |
+          UDID="$(xcrun simctl list devices available -j | node -e '
+            const d = JSON.parse(require("fs").readFileSync(0, "utf8")).devices;
+            const all = Object.entries(d).filter(([k]) => k.includes("iOS")).sort().reverse().flatMap(([, v]) => v);
+            console.log((all.find((x) => /^iPhone/.test(x.name)) || {}).udid || "");
+          ')"
+          [ -n "$UDID" ] || { echo "::error::No iPhone simulator on this runner"; exit 1; }
+          xcrun simctl boot "$UDID"
+          xcrun simctl bootstatus "$UDID" -b | tail -2
+          xcrun simctl install "$UDID" "$RUNNER_TEMP/dd/Build/Products/Debug-iphonesimulator/App.app"
+          # The permission dialog cannot be tapped from a script; this writes the same answer.
+          brew tap wix/brew >/dev/null 2>&1 && brew install applesimutils >/dev/null 2>&1
+          applesimutils --byId "$UDID" --bundle "$BUNDLE" --setPermissions notifications=YES
+          mkdir -p "$RUNNER_TEMP/evidence"
+          xcrun simctl launch --console-pty "$UDID" "$BUNDLE" > "$RUNNER_TEMP/evidence/app.log" 2>&1 &
+          sleep 20
+          cat > "$RUNNER_TEMP/payload.json" <<'EOF'
+          { "aps": { "alert": { "title": "Bolo pronto", "body": "Seu pedido saiu do forno" }, "sound": "default" }, "pedido": "42" }
+          EOF
+          xcrun simctl push "$UDID" "$BUNDLE" "$RUNNER_TEMP/payload.json"
+          sleep 4
+          xcrun simctl io "$UDID" screenshot "$RUNNER_TEMP/evidence/foreground.png"
+          sleep 4
+          xcrun simctl io "$UDID" screenshot "$RUNNER_TEMP/evidence/after.png"
+          xcrun simctl terminate "$UDID" "$BUNDLE" || true
+          echo "----- page log -----"
+          grep -a "PUSHTEST" "$RUNNER_TEMP/evidence/app.log" || true
+          grep -a -q "PUSHTEST received" "$RUNNER_TEMP/evidence/app.log" || { echo "::error::The page did not receive the notification"; tail -60 "$RUNNER_TEMP/evidence/app.log"; exit 1; }
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: push-smoke-ios
+          path: ${{ runner.temp }}/evidence

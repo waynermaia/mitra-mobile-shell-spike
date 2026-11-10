@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // App Store Connect API client for the shell pipeline. No dependencies, Node 22+.
 //
-//   node generator/asc.mjs ensure-bundle-id --bundle-id cloud.x.y --name "App Name"
+//   node generator/asc.mjs ensure-bundle-id --bundle-id cloud.x.y --name "App Name" [--push]
 //   node generator/asc.mjs app-id --bundle-id cloud.x.y
 //   node generator/asc.mjs next-build --bundle-id cloud.x.y [--fallback N]
 //   node generator/asc.mjs wait-build --bundle-id cloud.x.y --build N [--timeout-minutes 20]
@@ -146,13 +146,22 @@ export function nextBuildNumber(latestVersion, fallback) {
 
 // ---------- Commands ----------
 const commands = {
-  async "ensure-bundle-id"({ "bundle-id": bundleId, name }) {
+  async "ensure-bundle-id"({ "bundle-id": bundleId, name, push }) {
     need({ bundleId, name });
     let b = await findBundleId(bundleId);
     if (!b) {
       const r = await api("POST", "/v1/bundleIds", { data: { type: "bundleIds", attributes: { identifier: bundleId, name, platform: "IOS" } } });
       b = r.data;
       console.error(`[asc] registered bundle id ${bundleId} (${b.id})`);
+    }
+    if (push) {
+      // The aps-environment entitlement only signs when the bundle id has the capability.
+      const caps = await api("GET", `/v1/bundleIds/${b.id}/bundleIdCapabilities`);
+      if (!caps.data.some((c) => c.attributes.capabilityType === "PUSH_NOTIFICATIONS")) {
+        await api("POST", "/v1/bundleIdCapabilities", { data: { type: "bundleIdCapabilities", attributes: { capabilityType: "PUSH_NOTIFICATIONS" },
+          relationships: { bundleId: { data: { type: "bundleIds", id: b.id } } } } });
+        console.error(`[asc] enabled Push Notifications on ${bundleId}`);
+      }
     }
     console.log(b.id);
   },

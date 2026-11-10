@@ -45,6 +45,10 @@ on:
         description: "Declare applinks and webcredentials for the host on iOS (the host must serve the AASA file for sign-in to return to the app)"
         type: boolean
         default: true
+      push:
+        description: "Push notifications: aps entitlement on iOS; on Android only when the GOOGLE_SERVICES_JSON_B64 secret has this app (else Android is built without the push plugin)"
+        type: boolean
+        default: false
       upload_testflight:
         description: "Archive with cloud signing, upload to TestFlight and add the build to the group (app record must exist in App Store Connect)"
         type: boolean
@@ -77,6 +81,7 @@ env:
   INPUT_VERSION: ${{ inputs.version }}
   INPUT_BUILD_NUMBER: ${{ inputs.build_number }}
   INPUT_ASSOCIATED_DOMAINS: ${{ inputs.associated_domains }}
+  INPUT_PUSH: ${{ inputs.push }}
   ASC_KEY_ID: ${{ secrets.ASC_KEY_ID }}
   ASC_ISSUER_ID: ${{ secrets.ASC_ISSUER_ID }}
   ASC_KEY_P8_B64: ${{ secrets.ASC_KEY_P8_B64 }}
@@ -118,11 +123,14 @@ jobs:
           echo "Build number: $n"
       - name: Generate the shell
         id: gen
+        env:
+          GOOGLE_SERVICES_JSON_B64: ${{ secrets.GOOGLE_SERVICES_JSON_B64 }}
         run: |
           args=(--build-number "${{ steps.build.outputs.number }}" --version "$INPUT_VERSION" --no-ios --verbose)
           [ -n "$INPUT_APP" ] && args+=(--app "$INPUT_APP" --api "$INPUT_API")
           [ -n "$INPUT_URL" ] && args+=(--url "$INPUT_URL")
           [ -n "$INPUT_APP_ID" ] && args+=(--app-id "$INPUT_APP_ID")
+          [ "$INPUT_PUSH" = "true" ] && args+=(--push)
           node generator/generate.mjs "${args[@]}"
       - name: Restore the upload keystore
         env:
@@ -208,6 +216,7 @@ jobs:
           [ -n "$INPUT_URL" ] && args+=(--url "$INPUT_URL")
           [ -n "$INPUT_APP_ID" ] && args+=(--app-id "$INPUT_APP_ID")
           [ "$INPUT_ASSOCIATED_DOMAINS" = "true" ] && args+=(--associated-domains)
+          [ "$INPUT_PUSH" = "true" ] && args+=(--push)
           node generator/generate.mjs "${args[@]}"
       - name: Unsigned device build
         if: ${{ !inputs.upload_testflight }}
@@ -226,7 +235,7 @@ jobs:
           done
           mkdir -p "$RUNNER_TEMP/asc"
           echo "$ASC_KEY_P8_B64" | base64 -d > "$RUNNER_TEMP/asc/AuthKey_$ASC_KEY_ID.p8"
-          node generator/asc.mjs ensure-bundle-id --bundle-id "${{ steps.gen.outputs.app_id }}" --name "${{ steps.gen.outputs.app_name }}"
+          node generator/asc.mjs ensure-bundle-id --bundle-id "${{ steps.gen.outputs.app_id }}" --name "${{ steps.gen.outputs.app_name }}" ${{ inputs.push && '--push' || '' }}
           node generator/asc.mjs app-id --bundle-id "${{ steps.gen.outputs.app_id }}"
       - name: Archive with cloud signing
         if: ${{ inputs.upload_testflight }}
@@ -281,4 +290,5 @@ jobs:
             echo "- build: ${{ inputs.version }} (${{ steps.build.outputs.number }})"
             echo "- iOS: ${{ inputs.upload_testflight && 'uploaded to TestFlight' || 'unsigned device build only' }}"
             echo "- associated domains: ${{ inputs.associated_domains }}"
+            echo "- push: ${{ inputs.push }}"
           } >> "$GITHUB_STEP_SUMMARY"
