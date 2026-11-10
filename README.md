@@ -22,7 +22,7 @@ Target app: **Bolo Mobile Spike**, created in Infusion for this test. Published 
     through an App Store Connect API key and uploads to TestFlight.
 
 Plugins installed: app, splash-screen, status-bar, share, haptics, network, browser,
-push-notifications (push needs Firebase on Android and the aps entitlement on iOS; not wired).
+push-notifications (wired by the generator only with `--push`, see "Push" below).
 
 ## Generator (POC, 2026-11-08): one shell per app, from the platform app id
 
@@ -268,3 +268,37 @@ then `hw.keyboard=yes` in `~/.android/avd/spike35.avd/config.ini` so the Mac key
   (Google).
 - iOS builds need macOS; GitHub Actions `macos-26` worked for this spike without any local
   Xcode.
+
+## Push (2026-11-09)
+
+`--push` in the generator (input `push` in the App shell workflow). Off by default, and then the
+push plugin is left out of the native projects: the published page is not ours, and on Android the
+plugin crashes the app when a page calls `register()` without Firebase configured (seen on the
+emulator with the shell as it was before this flag).
+
+- **iOS** needs only the flag: `aps-environment` entitlement, the two `AppDelegate` calls that
+  hand the device token to the plugin, and the Push Notifications capability on the bundle id
+  (`asc.mjs ensure-bundle-id --push`).
+- **Android** also needs the Firebase config of that application id: `--google-services <file>`
+  locally, secret `GOOGLE_SERVICES_JSON_B64` in CI (one Firebase project can hold every app; the
+  file lists them all). Without a config for the app, Android is built without the plugin and the
+  generator says so. The file never goes to git.
+- **The page** uses Capacitor's `PushNotifications` plugin through the bridge the shell injects,
+  no dependency: `app-snippet/push-example.html` in the generated project. It asks for permission
+  from a user action, receives the token in `registration` and sends it to its own backend.
+- **Sending** is not in this repo: it takes an APNs key (iOS) and a Firebase service account
+  (Android), both credentials of the account owner.
+
+What was proved, and how:
+
+- Android, emulator, Bolo: with push off a page finds no plugin (no crash). With push on and a
+  made-up local Firebase config: permission goes from `prompt` to `granted`, `register()` ends in
+  a `registrationError` event (the made-up key) instead of a crash, and a delivery simulated with
+  a root broadcast of the FCM intent reaches the page in the foreground
+  (`pushNotificationReceived`, title, body and data), shows in the shade in the background, and
+  the tap opens the app and fires `pushNotificationActionPerformed`.
+- iOS: `.github/workflows/push-smoke-ios.yml` builds the shell for the simulator and delivers a
+  notification with `simctl push`; the run fails when the page does not receive it.
+- Not proved: a real token and a real delivery on either platform (they need the credentials
+  above), and the tap on iOS.
+
