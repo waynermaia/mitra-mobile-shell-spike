@@ -3,7 +3,7 @@ import WebKit
 import AuthenticationServices
 import Capacitor
 
-// Written by mitra-mobile-shell-spike/generator. The platform publishes a web app that does not
+// Written by mitra-mobile-shell/generator. The platform publishes a web app that does not
 // know this shell exists, so the shell does the two native things sign-in needs:
 //
 //  1. A top-level navigation to an identity host (the platform API, Google, Microsoft) opens in

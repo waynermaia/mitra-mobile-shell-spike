@@ -7,12 +7,11 @@ name: App shell
 #   iOS:     unsigned device build by default; with upload_testflight the archive is cloud-signed
 #            with the App Store Connect API key, uploaded, and once processed added to the
 #            TestFlight group (the app record must exist in App Store Connect once).
-# The build number comes from App Store Connect (latest build + 1) so both stores move together;
-# the run number is the fallback for an app that has no record yet.
+# The build number is resolved once, in the version job, for both stores (see that job).
 #
-# Runners come from repository variables so the same workflow runs on GitHub-hosted machines
-# today and on self-hosted ones later: LINUX_RUNNER (default ubuntu-latest) and MACOS_RUNNER
-# (default macos-26, the first image with the iOS 26 SDK App Store Connect requires).
+# Linux jobs run on the org's delivery runners, the group used by every job that ships something
+# with an environment; GitHub-hosted Linux machines are not available to the org. iOS needs macOS:
+# MACOS_RUNNER (default macos-26, the first image with the iOS 26 SDK App Store Connect requires).
 
 on:
   workflow_dispatch:
@@ -66,6 +65,9 @@ on:
         type: string
         default: "internal"
 
+permissions:
+  contents: read
+
 # One run per app at a time: the build number is read from App Store Connect before the upload,
 # so two runs of the same app would ask for the same number. A queued run waits, it is not
 # cancelled: cancelling after the upload burns the number.
@@ -82,28 +84,28 @@ env:
   INPUT_BUILD_NUMBER: ${{ inputs.build_number }}
   INPUT_ASSOCIATED_DOMAINS: ${{ inputs.associated_domains }}
   INPUT_PUSH: ${{ inputs.push }}
-  ASC_KEY_ID: ${{ secrets.ASC_KEY_ID }}
-  ASC_ISSUER_ID: ${{ secrets.ASC_ISSUER_ID }}
-  ASC_KEY_P8_B64: ${{ secrets.ASC_KEY_P8_B64 }}
-  APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
 
 jobs:
-  android:
-    name: Android (signed AAB and APK, Play upload)
-    runs-on: ${{ vars.LINUX_RUNNER || 'ubuntu-latest' }}
+  # The build number is resolved once, before both builds: reading the Play history opens an edit,
+  # and Google keeps one open edit per app, so a read running beside the Android upload would
+  # invalidate it.
+  version:
+    name: Build number
+    runs-on:
+      group: mitra-delivery
+      labels: mitra-delivery
+    environment: stores
+    outputs:
+      number: ${{ steps.build.outputs.number }}
     defaults:
       run:
         shell: bash
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803  # v6
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020  # v7
         with:
           node-version: 22
           cache: npm
-      - uses: actions/setup-java@v4
-        with:
-          distribution: temurin
-          java-version: 21
       - name: Resolve the app identity
         id: identity
         run: |
@@ -115,18 +117,82 @@ jobs:
           node generator/generate.mjs "${args[@]}"
       - name: Resolve the build number
         id: build
+        env:
+          ASC_KEY_ID: ${{ secrets.ASC_KEY_ID }}
+          ASC_ISSUER_ID: ${{ secrets.ASC_ISSUER_ID }}
+          ASC_KEY_P8_B64: ${{ secrets.ASC_KEY_P8_B64 }}
+          PLAY_SERVICE_ACCOUNT_JSON_B64: ${{ secrets.PLAY_SERVICE_ACCOUNT_JSON_B64 }}
+          APP_ID: ${{ steps.identity.outputs.app_id }}
+          UPLOAD_PLAY: ${{ inputs.upload_play }}
+          UPLOAD_TESTFLIGHT: ${{ inputs.upload_testflight }}
+        # One number for both stores: above the highest App Store build, above the highest Play
+        # versionCode in any track, and above the run number. A store that is uploaded to but
+        # whose history cannot be read stops the run: the number would not be known to be new.
         run: |
-          if [ -n "$INPUT_BUILD_NUMBER" ]; then n="$INPUT_BUILD_NUMBER"
-          elif [ -n "$ASC_KEY_ID" ]; then n="$(node generator/asc.mjs next-build --bundle-id "${{ steps.identity.outputs.app_id }}" --fallback "$GITHUB_RUN_NUMBER")"
-          else n="$GITHUB_RUN_NUMBER"; fi
+          if [ -n "$INPUT_BUILD_NUMBER" ]; then
+            n="$INPUT_BUILD_NUMBER"
+          else
+            n="$GITHUB_RUN_NUMBER"
+            if [ -n "$ASC_KEY_ID" ]; then
+              a="$(node generator/asc.mjs next-build --bundle-id "$APP_ID" --fallback "$n")"
+              [ "$a" -gt "$n" ] && n="$a"
+            elif [ "$UPLOAD_TESTFLIGHT" = true ]; then
+              echo "::error::No App Store Connect secrets to read the build history; set them or pass build_number."; exit 1
+            fi
+            if [ -n "$PLAY_SERVICE_ACCOUNT_JSON_B64" ]; then
+              if p="$(node generator/play.mjs latest-version-code --package "$APP_ID")"; then
+                [ "$((p + 1))" -gt "$n" ] && n="$((p + 1))"
+              elif [ "$UPLOAD_PLAY" = true ]; then
+                echo "::error::Could not read the Play history of $APP_ID; pass build_number above every versionCode already in Play."; exit 1
+              else
+                echo "::warning::Could not read the Play history of $APP_ID; the number only follows App Store Connect."
+              fi
+            fi
+          fi
           echo "number=$n" >> "$GITHUB_OUTPUT"
           echo "Build number: $n"
+
+  android:
+    name: Android (signed AAB and APK, Play upload)
+    needs: version
+    runs-on:
+      group: mitra-delivery
+      labels: mitra-delivery
+    environment: stores
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803  # v6
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020  # v7
+        with:
+          node-version: 22
+          cache: npm
+      - uses: actions/setup-java@b6effb05e454b25005698d916606bdc6ffcbf961  # v5
+        with:
+          distribution: temurin
+          java-version: 21
+      # The delivery runners carry no Android SDK (GitHub-hosted images do). The action installs the
+      # command-line tools and accepts the SDK licenses, which Gradle requires to fetch platforms.
+      - uses: android-actions/setup-android@be39fa834029ff78f1a44aa3bb0819b8fc2bd8fd  # v4.0.4
+        with:
+          log-accepted-android-sdk-licenses: false
+      - name: Resolve the app identity
+        id: identity
+        run: |
+          args=(--identity)
+          [ -n "$INPUT_APP" ] && args+=(--app "$INPUT_APP" --api "$INPUT_API")
+          [ -n "$INPUT_URL" ] && args+=(--url "$INPUT_URL")
+          [ -n "$INPUT_APP_ID" ] && args+=(--app-id "$INPUT_APP_ID")
+          [ -n "$INPUT_APP$INPUT_URL" ] || { echo "::error::Give app (UUID) or url"; exit 1; }
+          node generator/generate.mjs "${args[@]}"
       - name: Generate the shell
         id: gen
         env:
           GOOGLE_SERVICES_JSON_B64: ${{ secrets.GOOGLE_SERVICES_JSON_B64 }}
+          BUILD_NUMBER: ${{ needs.version.outputs.number }}
         run: |
-          args=(--build-number "${{ steps.build.outputs.number }}" --version "$INPUT_VERSION" --no-ios --verbose)
+          args=(--build-number "$BUILD_NUMBER" --version "$INPUT_VERSION" --no-ios --verbose)
           [ -n "$INPUT_APP" ] && args+=(--app "$INPUT_APP" --api "$INPUT_API")
           [ -n "$INPUT_URL" ] && args+=(--url "$INPUT_URL")
           [ -n "$INPUT_APP_ID" ] && args+=(--app-id "$INPUT_APP_ID")
@@ -154,15 +220,18 @@ jobs:
         env:
           PLAY_SERVICE_ACCOUNT_JSON_B64: ${{ secrets.PLAY_SERVICE_ACCOUNT_JSON_B64 }}
           PLAY_TRACK: ${{ inputs.play_track }}
+          PROJECT_DIR: ${{ steps.gen.outputs.project_dir }}
+          APP_ID: ${{ steps.gen.outputs.app_id }}
+          BUILD_NUMBER: ${{ needs.version.outputs.number }}
         run: |
           if [ -z "$PLAY_SERVICE_ACCOUNT_JSON_B64" ]; then
             echo "::warning::No PLAY_SERVICE_ACCOUNT_JSON_B64 secret: the AAB is in the artifact, upload it in Play Console."
             exit 0
           fi
-          aab="$(ls "${{ steps.gen.outputs.project_dir }}"/android/app/build/outputs/bundle/release/*.aab | head -1)"
+          aab="$(ls "$PROJECT_DIR"/android/app/build/outputs/bundle/release/*.aab | head -1)"
           set +e
-          node generator/play.mjs upload --package "${{ steps.gen.outputs.app_id }}" --aab "$aab" \
-            --track "$PLAY_TRACK" --release-name "$INPUT_VERSION (${{ steps.build.outputs.number }})"
+          node generator/play.mjs upload --package "$APP_ID" --aab "$aab" \
+            --track "$PLAY_TRACK" --release-name "$INPUT_VERSION ($BUILD_NUMBER)"
           rc=$?
           set -e
           if [ "$rc" -eq 3 ]; then
@@ -170,7 +239,7 @@ jobs:
             exit 0
           fi
           exit "$rc"
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7
         with:
           name: android-${{ steps.gen.outputs.slug }}
           path: |
@@ -181,13 +250,15 @@ jobs:
 
   ios:
     name: iOS (${{ inputs.upload_testflight && 'cloud signing and TestFlight upload' || 'unsigned device build' }})
+    needs: version
     runs-on: ${{ vars.MACOS_RUNNER || 'macos-26' }}
+    environment: stores
     defaults:
       run:
         shell: bash
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803  # v6
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020  # v7
         with:
           node-version: 22
           cache: npm
@@ -200,18 +271,12 @@ jobs:
           [ -n "$INPUT_APP_ID" ] && args+=(--app-id "$INPUT_APP_ID")
           [ -n "$INPUT_APP$INPUT_URL" ] || { echo "::error::Give app (UUID) or url"; exit 1; }
           node generator/generate.mjs "${args[@]}"
-      - name: Resolve the build number
-        id: build
-        run: |
-          if [ -n "$INPUT_BUILD_NUMBER" ]; then n="$INPUT_BUILD_NUMBER"
-          elif [ -n "$ASC_KEY_ID" ]; then n="$(node generator/asc.mjs next-build --bundle-id "${{ steps.identity.outputs.app_id }}" --fallback "$GITHUB_RUN_NUMBER")"
-          else n="$GITHUB_RUN_NUMBER"; fi
-          echo "number=$n" >> "$GITHUB_OUTPUT"
-          echo "Build number: $n"
       - name: Generate the shell
         id: gen
+        env:
+          BUILD_NUMBER: ${{ needs.version.outputs.number }}
         run: |
-          args=(--build-number "${{ steps.build.outputs.number }}" --version "$INPUT_VERSION" --verbose)
+          args=(--build-number "$BUILD_NUMBER" --version "$INPUT_VERSION" --verbose)
           [ -n "$INPUT_APP" ] && args+=(--app "$INPUT_APP" --api "$INPUT_API")
           [ -n "$INPUT_URL" ] && args+=(--url "$INPUT_URL")
           [ -n "$INPUT_APP_ID" ] && args+=(--app-id "$INPUT_APP_ID")
@@ -229,17 +294,30 @@ jobs:
           ls "$RUNNER_TEMP/dd/Build/Products/Release-iphoneos/"
       - name: Check the App Store Connect secrets and the app record
         if: ${{ inputs.upload_testflight }}
+        env:
+          ASC_KEY_ID: ${{ secrets.ASC_KEY_ID }}
+          ASC_ISSUER_ID: ${{ secrets.ASC_ISSUER_ID }}
+          ASC_KEY_P8_B64: ${{ secrets.ASC_KEY_P8_B64 }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          APP_ID: ${{ steps.gen.outputs.app_id }}
+          APP_NAME: ${{ steps.gen.outputs.app_name }}
         run: |
           for v in ASC_KEY_ID ASC_ISSUER_ID ASC_KEY_P8_B64 APPLE_TEAM_ID; do
             [ -n "${!v}" ] || { echo "::error::Missing secret $v"; exit 1; }
           done
           mkdir -p "$RUNNER_TEMP/asc"
           echo "$ASC_KEY_P8_B64" | base64 -d > "$RUNNER_TEMP/asc/AuthKey_$ASC_KEY_ID.p8"
-          node generator/asc.mjs ensure-bundle-id --bundle-id "${{ steps.gen.outputs.app_id }}" --name "${{ steps.gen.outputs.app_name }}" ${{ inputs.push && '--push' || '' }}
-          node generator/asc.mjs app-id --bundle-id "${{ steps.gen.outputs.app_id }}"
+          args=(--bundle-id "$APP_ID" --name "$APP_NAME")
+          [ "$INPUT_PUSH" = "true" ] && args+=(--push)
+          node generator/asc.mjs ensure-bundle-id "${args[@]}"
+          node generator/asc.mjs app-id --bundle-id "$APP_ID"
       - name: Archive with cloud signing
         if: ${{ inputs.upload_testflight }}
         working-directory: ${{ steps.gen.outputs.project_dir }}
+        env:
+          ASC_KEY_ID: ${{ secrets.ASC_KEY_ID }}
+          ASC_ISSUER_ID: ${{ secrets.ASC_ISSUER_ID }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
         run: |
           xcodebuild -project ios/App/App.xcodeproj -scheme App -configuration Release \
             -destination 'generic/platform=iOS' \
@@ -252,6 +330,10 @@ jobs:
             archive | tail -40
       - name: Export and upload to App Store Connect
         if: ${{ inputs.upload_testflight }}
+        env:
+          ASC_KEY_ID: ${{ secrets.ASC_KEY_ID }}
+          ASC_ISSUER_ID: ${{ secrets.ASC_ISSUER_ID }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
         run: |
           cat > "$RUNNER_TEMP/export.plist" <<EOF
           <?xml version="1.0" encoding="UTF-8"?>
@@ -277,18 +359,29 @@ jobs:
         if: ${{ inputs.upload_testflight }}
         continue-on-error: true
         env:
+          ASC_KEY_ID: ${{ secrets.ASC_KEY_ID }}
+          ASC_ISSUER_ID: ${{ secrets.ASC_ISSUER_ID }}
+          ASC_KEY_P8_B64: ${{ secrets.ASC_KEY_P8_B64 }}
           TESTFLIGHT_GROUP: ${{ inputs.testflight_group }}
+          APP_ID: ${{ steps.gen.outputs.app_id }}
+          BUILD_NUMBER: ${{ needs.version.outputs.number }}
         run: |
-          node generator/asc.mjs wait-build --bundle-id "${{ steps.gen.outputs.app_id }}" --build "${{ steps.build.outputs.number }}" --timeout-minutes 20
-          node generator/asc.mjs add-to-group --bundle-id "${{ steps.gen.outputs.app_id }}" --build "${{ steps.build.outputs.number }}" --group "$TESTFLIGHT_GROUP"
+          node generator/asc.mjs wait-build --bundle-id "$APP_ID" --build "$BUILD_NUMBER" --timeout-minutes 20
+          node generator/asc.mjs add-to-group --bundle-id "$APP_ID" --build "$BUILD_NUMBER" --group "$TESTFLIGHT_GROUP"
       - name: Summary
+        env:
+          APP_NAME: ${{ steps.gen.outputs.app_name }}
+          APP_ID: ${{ steps.gen.outputs.app_id }}
+          APP_URL: ${{ steps.gen.outputs.url }}
+          BUILD_NUMBER: ${{ needs.version.outputs.number }}
+          IOS_RESULT: ${{ inputs.upload_testflight && 'uploaded to TestFlight' || 'unsigned device build only' }}
         run: |
           {
-            echo "### ${{ steps.gen.outputs.app_name }}"
-            echo "- bundle id: \`${{ steps.gen.outputs.app_id }}\`"
-            echo "- loads: ${{ steps.gen.outputs.url }}"
-            echo "- build: ${{ inputs.version }} (${{ steps.build.outputs.number }})"
-            echo "- iOS: ${{ inputs.upload_testflight && 'uploaded to TestFlight' || 'unsigned device build only' }}"
-            echo "- associated domains: ${{ inputs.associated_domains }}"
-            echo "- push: ${{ inputs.push }}"
+            echo "### $APP_NAME"
+            echo "- bundle id: \`$APP_ID\`"
+            echo "- loads: $APP_URL"
+            echo "- build: $INPUT_VERSION ($BUILD_NUMBER)"
+            echo "- iOS: $IOS_RESULT"
+            echo "- associated domains: $INPUT_ASSOCIATED_DOMAINS"
+            echo "- push: $INPUT_PUSH"
           } >> "$GITHUB_STEP_SUMMARY"

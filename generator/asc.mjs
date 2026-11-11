@@ -7,6 +7,7 @@
 //   node generator/asc.mjs wait-build --bundle-id cloud.x.y --build N [--timeout-minutes 20]
 //   node generator/asc.mjs add-to-group --bundle-id cloud.x.y --build N --group "Group Name"
 //   node generator/asc.mjs expire-build --bundle-id cloud.x.y --build N
+//   node generator/asc.mjs copy-internal-testers --bundle-id cloud.x.y --from cloud.x.z
 //   node generator/asc.mjs info --bundle-id cloud.x.y
 //   node generator/asc.mjs builds --bundle-id cloud.x.y
 //   node generator/asc.mjs selftest
@@ -22,10 +23,8 @@
 // next-build prints only a number so the CI can capture it: the fallback (or 1) when the app has
 // no build yet or no app record, otherwise max(highest build number ever, fallback) + 1.
 
-import { createPrivateKey, sign } from "node:crypto";
-import { readFileSync, writeFileSync, mkdtempSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { createPrivateKey, generateKeyPairSync, sign } from "node:crypto";
+import { readFileSync } from "node:fs";
 
 const API = "https://api.appstoreconnect.apple.com";
 const EXIT_MANUAL_STEP = 3;
@@ -58,22 +57,22 @@ export function buildJwt({ keyId, issuerId, pem, now = Math.floor(Date.now() / 1
 
 function keyPem() {
   if (process.env.ASC_KEY_PATH) return readFileSync(process.env.ASC_KEY_PATH, "utf8");
-  if (process.env.ASC_KEY_P8_B64) {
-    const dir = mkdtempSync(join(tmpdir(), "asc-"));
-    const file = join(dir, "AuthKey.p8");
-    writeFileSync(file, Buffer.from(process.env.ASC_KEY_P8_B64, "base64"), { mode: 0o600 });
-    return readFileSync(file, "utf8");
-  }
+  if (process.env.ASC_KEY_P8_B64) return Buffer.from(process.env.ASC_KEY_P8_B64, "base64").toString("utf8");
   return fail("Set ASC_KEY_PATH (a .p8 file) or ASC_KEY_P8_B64.");
 }
 
+// The token lives 15 minutes and wait-build polls for up to 20, so it is renewed before it ends.
+const JWT_REUSE_SECONDS = 10 * 60;
 let cachedJwt = null;
+let cachedJwtAt = 0;
 function jwt() {
-  if (cachedJwt) return cachedJwt;
+  const now = Math.floor(Date.now() / 1000);
+  if (cachedJwt && now - cachedJwtAt < JWT_REUSE_SECONDS) return cachedJwt;
   const keyId = process.env.ASC_KEY_ID;
   const issuerId = process.env.ASC_ISSUER_ID;
   if (!keyId || !issuerId) fail("Set ASC_KEY_ID and ASC_ISSUER_ID.");
-  cachedJwt = buildJwt({ keyId, issuerId, pem: keyPem() });
+  cachedJwt = buildJwt({ keyId, issuerId, pem: keyPem(), now });
+  cachedJwtAt = now;
   return cachedJwt;
 }
 
@@ -90,9 +89,15 @@ async function api(method, path, body, { allow = [] } = {}) {
     const text = await res.text();
     if (res.ok) return text ? JSON.parse(text) : null;
     if (allow.includes(res.status)) return { status: res.status, errorText: text };
-    if (attempt === 1 && (res.status === 429 || res.status >= 500)) { await sleep(5000); continue; }
+    if (attempt === 1 && isRetryable(method, res.status)) { await sleep(5000); continue; }
     throw new Error(`${method} ${path} -> ${res.status}: ${text.slice(0, 600)}`);
   }
+}
+
+// Only reads retry. A write that failed may still have been applied, and repeating a create or an
+// upload could duplicate it; the caller reruns the workflow, whose steps look before they create.
+export function isRetryable(method, status) {
+  return method === "GET" && (status === 429 || status >= 500);
 }
 
 // ---------- Resources ----------
@@ -121,9 +126,22 @@ async function latestBuild(appId) {
 // The highest build number the app ever had, whatever its upload date: a build uploaded later
 // with a lower number (a parallel train, a run-number fallback) must not pull the counter back.
 async function highestBuildNumber(appId) {
-  const r = await api("GET", `/v1/builds?filter[app]=${appId}&limit=200&fields[builds]=version`);
-  const numbers = r.data.map((b) => Number.parseInt(String(b.attributes.version), 10)).filter((n) => !Number.isNaN(n));
-  return numbers.length ? String(Math.max(...numbers)) : null;
+  let max = null;
+  let path = `/v1/builds?filter[app]=${appId}&limit=200&fields[builds]=version`;
+  while (path) {
+    const r = await api("GET", path);
+    max = maxBuildVersion(r.data, max);
+    path = r.links?.next ? r.links.next.replace(API, "") : null;
+  }
+  return max === null ? null : String(max);
+}
+export function maxBuildVersion(builds, start = null) {
+  let max = start;
+  for (const b of builds) {
+    const n = Number.parseInt(String(b.attributes.version), 10);
+    if (!Number.isNaN(n) && (max === null || n > max)) max = n;
+  }
+  return max;
 }
 
 async function buildByNumber(appId, build) {
@@ -290,7 +308,6 @@ const commands = {
     assert(nextBuildNumber("10", "3") === 11, "latest 10 fallback 3 -> 11");
     assert(nextBuildNumber("4", "9") === 10, "latest 4 fallback 9 -> 10");
     assert(nextBuildNumber("abc", "5") === 5, "unparseable latest -> fallback");
-    const { generateKeyPairSync } = cryptoModule;
     const { privateKey } = generateKeyPairSync("ec", { namedCurve: "prime256v1" });
     const pem = privateKey.export({ type: "pkcs8", format: "pem" });
     const token = buildJwt({ keyId: "KEY123", issuerId: "issuer-uuid", pem, now: 1_700_000_000 });
@@ -300,11 +317,11 @@ const commands = {
     assert(header.alg === "ES256" && header.kid === "KEY123" && header.typ === "JWT", "jwt header");
     assert(payload.iss === "issuer-uuid" && payload.aud === "appstoreconnect-v1" && payload.exp - payload.iat === 900, "jwt payload");
     assert(Buffer.from(s, "base64url").length === 64, "ES256 signature is raw r||s (64 bytes)");
+    assert(isRetryable("GET", 503) && isRetryable("GET", 429) && !isRetryable("POST", 429) && !isRetryable("POST", 503) && !isRetryable("PATCH", 500) && !isRetryable("DELETE", 502) && !isRetryable("GET", 404), "isRetryable");
+    assert(maxBuildVersion([{ attributes: { version: "7" } }, { attributes: { version: "x" } }], 12) === 12 && maxBuildVersion([{ attributes: { version: "15" } }], 12) === 15 && maxBuildVersion([]) === null, "maxBuildVersion");
     console.log("[asc] selftest ok");
   },
 };
-
-import * as cryptoModule from "node:crypto";
 
 function need(values) {
   for (const [k, v] of Object.entries(values)) if (v === undefined || v === true || v === "") fail(`missing --${k.replace(/([A-Z])/g, "-$1").toLowerCase()}`);

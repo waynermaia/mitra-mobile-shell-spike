@@ -3,7 +3,7 @@
 //
 //   node generator/play.mjs upload --package cloud.x.y --aab path/app-release.aab \
 //        [--track internal] [--release-name "1.0 (12)"] [--status completed]
-//   node generator/play.mjs latest-version-code --package cloud.x.y [--track internal]
+//   node generator/play.mjs latest-version-code --package cloud.x.y
 //   node generator/play.mjs selftest
 //
 // Env: PLAY_SERVICE_ACCOUNT_JSON_B64, base64 of the service account key file (JSON with
@@ -13,10 +13,10 @@
 // Exit codes: 0 ok, 1 error (API or usage), 3 a manual step is required (the app does not exist
 // in Play Console or its first AAB was never uploaded by hand; the API cannot do either).
 //
-// latest-version-code prints only a number so the CI can capture it: the highest versionCode
-// across the releases of the track, or 0 when the track is empty.
+// latest-version-code prints only a number so the CI can capture it: the highest versionCode in
+// any track of the app, or 0 when nothing was released. Play refuses a versionCode it has seen.
 
-import { createPrivateKey, sign } from "node:crypto";
+import { createPrivateKey, generateKeyPairSync, sign } from "node:crypto";
 import { readFileSync } from "node:fs";
 
 const API = "https://androidpublisher.googleapis.com/androidpublisher/v3";
@@ -92,9 +92,15 @@ async function api(method, url, body, contentType = "application/json") {
       console.error("[play] and the service account must be invited under Users and permissions with 'Release to testing tracks' on the app.");
       process.exit(EXIT_MANUAL_STEP);
     }
-    if (attempt === 1 && (res.status === 429 || res.status >= 500)) { await sleep(5000); continue; }
+    // Same rule as asc.mjs: only reads retry, since a failed edit or upload may have been applied.
+    if (attempt === 1 && isRetryable(method, res.status)) { await sleep(5000); continue; }
     throw new Error(`${method} ${url} -> ${res.status}: ${text.slice(0, 600)}`);
   }
+}
+
+// Kept apart from asc.mjs on purpose: importing it would run its command line.
+export function isRetryable(method, status) {
+  return method === "GET" && (status === 429 || status >= 500);
 }
 
 export function manualStepError(status, text) {
@@ -133,12 +139,12 @@ const commands = {
     console.log(JSON.stringify({ versionCode, track, status }));
   },
 
-  async "latest-version-code"({ package: pkg, track = "internal" }) {
+  async "latest-version-code"({ package: pkg }) {
     need({ package: pkg });
     const editId = await insertEdit(pkg);
     try {
-      const t = await api("GET", `${editsUrl(pkg)}/${editId}/tracks/${encodeURIComponent(track)}`);
-      console.log(maxVersionCode(t));
+      const r = await api("GET", `${editsUrl(pkg)}/${editId}/tracks`);
+      console.log(Math.max(0, ...(r?.tracks || []).map(maxVersionCode)));
     } finally {
       await api("DELETE", `${editsUrl(pkg)}/${editId}`).catch(() => {});
     }
@@ -153,7 +159,6 @@ const commands = {
     assert(manualStepError(404, '{"error":{"message":"Package not found: cloud.x.y."}}'), "404 package not found");
     assert(manualStepError(403, '{"error":{"message":"The caller does not have permission"}}'), "403 permission");
     assert(!manualStepError(400, '{"error":{"message":"APK specifies a version code that has already been used."}}'), "400 is a real error");
-    const { generateKeyPairSync } = cryptoModule;
     const { privateKey } = generateKeyPairSync("rsa", { modulusLength: 2048 });
     const pem = privateKey.export({ type: "pkcs8", format: "pem" });
     const token = buildAssertion({ clientEmail: "sa@project.iam.gserviceaccount.com", pem, now: 1_700_000_000 });
@@ -163,11 +168,10 @@ const commands = {
     assert(header.alg === "RS256" && header.typ === "JWT", "jwt header");
     assert(payload.iss === "sa@project.iam.gserviceaccount.com" && payload.scope === SCOPE && payload.aud === TOKEN_URL && payload.exp - payload.iat === 3600, "jwt payload");
     assert(Buffer.from(s, "base64url").length === 256, "RS256 signature is 256 bytes for a 2048-bit key");
+    assert(isRetryable("GET", 500) && !isRetryable("POST", 429) && !isRetryable("PUT", 503), "isRetryable");
     console.log("[play] selftest ok");
   },
 };
-
-import * as cryptoModule from "node:crypto";
 
 function need(values) {
   for (const [k, v] of Object.entries(values)) if (v === undefined || v === true || v === "") fail(`missing --${k}`);

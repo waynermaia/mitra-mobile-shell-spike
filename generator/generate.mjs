@@ -1,9 +1,10 @@
 #!/usr/bin/env node
-// POC: generate a Capacitor shell for ONE app published by the platform.
+// Generate a Capacitor shell for ONE app published by the platform.
 //
 //   node generator/generate.mjs --app <app uuid> [--api https://beta.mitralab.io] [...flags]
 //   node generator/generate.mjs --url https://<published host> [...flags]
-//   node generator/generate.mjs --descriptor apps/bolo.json [flags override the file]
+//   node generator/generate.mjs --descriptor path/to/app.json [flags override the file]
+//   node generator/generate.mjs --selftest
 //
 //   flags: [--name "..."] [--app-id x.y.z] [--icon <file|url>] [--theme "#0f172a"] [--version 1.0]
 //          [--build-number 1] [--associated-domains] [--auth-hosts a.com,b.com] [--out out]
@@ -13,9 +14,10 @@
 // Source of truth for the identity is the platform: GET {api}/code-studio/api/v1/apps/{app}/info
 // (public, no token) gives name, published origins, accent color and the login logo. The page
 // itself is only scraped for what the API does not carry yet (the icon when there is no login
-// logo, title and theme-color in --url mode). Then it writes package.json +
+// logo, title and theme-color in --url mode). An app without an icon gets one drawn from its
+// initials on the theme color. Then it writes package.json +
 // capacitor.config.json + www/ + assets/, npm ci,
-// cap add android/ios, apply the patches the spike proved (App Link intent-filter, onNewIntent
+// cap add android/ios, apply the native patches (App Link intent-filter, onNewIntent
 // in MainActivity, release signing from env, exempt encryption, optional Associated Domains,
 // SceneDelegate with the sign-in session and Universal Link handling on iOS),
 // generate icons and splash, cap sync, copy the CI workflow. Optionally builds and installs
@@ -26,7 +28,7 @@
 // shell by a URL scheme named after the app id, which needs nothing on the host: the app page
 // bounces the fragment to the scheme (the snippet in app-snippet/, which the app must include).
 // "https" is the Universal Link callback, which needs the host to serve the
-// apple-app-site-association file (mitra-terraform#1101) and --associated-domains.
+// apple-app-site-association file and --associated-domains.
 //
 // Push (--push): off by default, and then the push plugin is left out of the native projects, so a
 // page that calls it gets "not implemented". iOS needs only the flag (aps-environment entitlement
@@ -54,6 +56,11 @@ for (let i = 0; i < args.length; i++) {
   else { flags[key] = next; i++; }
 }
 
+const HEX_COLOR = /^#[0-9a-fA-F]{3}([0-9a-fA-F]{3})?$/;
+const DEFAULT_THEME_COLOR = "#0f172a";
+
+if (flags.selftest) { selftest(); process.exit(0); }
+
 const descriptor = flags.descriptor ? JSON.parse(readFileSync(resolve(flags.descriptor), "utf8")) : {};
 const appUuid = flags.app || descriptor.app;
 const apiBase = String(flags.api || descriptor.api || process.env.MITRA_API_URL || "https://beta.mitralab.io").replace(/\/$/, "");
@@ -71,15 +78,23 @@ const scraped = scrape(page, url);
 const appName = clean(flags.name || descriptor.name || info?.name || scraped.title || new URL(url).hostname);
 const slug = slugify(appName);
 const appId = flags["app-id"] || descriptor.appId || `cloud.${brandSegment(info?.brand)}.${packageSegment(slug)}`;
-const themeColor = flags.theme || descriptor.themeColor || info?.accentColor || scraped.themeColor || "#0f172a";
+let themeColor;
+try {
+  themeColor = resolveThemeColor(flags.theme || descriptor.themeColor, [info?.accentColor, scraped.themeColor]);
+} catch (e) { fail(e.message); }
+// Both end up unquoted or inside a Groovy string in build.gradle and in the Xcode project.
 const versionName = String(flags.version || descriptor.version || "1.0");
+if (!isVersionName(versionName)) fail(`--version must look like 1, 1.2 or 1.2.3, got ${JSON.stringify(versionName)}`);
 const buildNumber = Number(flags["build-number"] || descriptor.buildNumber || 1);
+if (!Number.isInteger(buildNumber) || buildNumber < 1) fail("--build-number must be a positive integer");
 const associatedDomains = Boolean(flags["associated-domains"] || descriptor.associatedDomains);
 const callback = String(flags.callback || descriptor.callback || "scheme");
 if (!["scheme", "https"].includes(callback)) fail(`--callback must be scheme or https, got ${callback}`);
 const wantPush = Boolean(flags.push || descriptor.push);
 const iconSource = flags.icon || descriptor.icon || info?.logoUrl || scraped.icon;
 const host = new URL(url).host;
+// The host is written into AndroidManifest.xml and the iOS entitlements as is.
+if (!isPlainHost(host)) fail(`Unsupported host in the app URL: ${JSON.stringify(host)}`);
 // A bundle id is a valid URL scheme (letters, digits, dot, hyphen), unique per app on the device.
 const callbackScheme = callback === "scheme" ? appId.toLowerCase() : undefined;
 // Hosts whose top-level navigation is a sign-in: the shell opens them in a native auth session
@@ -108,7 +123,7 @@ log(`slug     ${slug}`);
 log(`appId    ${appId}`);
 log(`url      ${url}`);
 log(`theme    ${themeColor}`);
-log(`icon     ${iconSource ? describe(iconSource) : "(none, falling back to the template logo)"}`);
+log(`icon     ${iconSource ? describe(iconSource) : `(none, drawing the initials ${initials(appName, slug)})`}`);
 log(`push     ${wantPush ? `ios ${pushIos ? "on" : "off"}, android ${pushAndroid ? "on" : "off (no Firebase config for " + appId + ")"}` : "off"}`);
 log(`out      ${projectDir}`);
 
@@ -135,17 +150,16 @@ const pkg = {
   version: `${versionName}.${buildNumber}`,
   private: true,
   type: "commonjs",
-  description: `Capacitor shell for ${appName} (${url}), generated by mitra-mobile-shell-spike/generator`,
+  description: `Capacitor shell for ${appName} (${url}), generated by mitra-mobile-shell/generator`,
   scripts: {
     sync: "cap sync",
     assets: `capacitor-assets generate --iconBackgroundColor '${themeColor}' --iconBackgroundColorDark '${themeColor}' --splashBackgroundColor '${themeColor}' --splashBackgroundColorDark '${themeColor}'`
   },
-  dependencies: templatePkg.dependencies,
-  devDependencies: templatePkg.devDependencies
+  dependencies: templatePkg.dependencies
 };
 writeJson(join(projectDir, "package.json"), pkg);
 cpSync(join(templateRoot, "package-lock.json"), join(projectDir, "package-lock.json"));
-cpSync(join(templateRoot, ".gitignore"), join(projectDir, ".gitignore"));
+cpSync(join(here, "templates", "gitignore"), join(projectDir, ".gitignore"));
 
 // The published page is not ours, so a plugin is in a platform only when that platform is ready
 // for it: the push plugin crashes Android on register() without Firebase, and on iOS it would
@@ -173,7 +187,7 @@ writeJson(join(projectDir, "capacitor.config.json"), {
 writeFileSync(join(projectDir, "www", "index.html"), offlinePage(appName, themeColor));
 
 // Icon: @capacitor/assets takes assets/logo.(svg|png) and derives icon and splash from it.
-const logoPath = await materializeIcon(iconSource, url, join(projectDir, "assets"));
+const logoPath = await materializeIcon(iconSource, join(projectDir, "assets"), initialsLogoSvg(initials(appName, slug), themeColor));
 log(`logo     ${logoPath}`);
 
 // Descriptor echo, so the generated project is reproducible from itself.
@@ -201,7 +215,7 @@ if (wantIos) log(`ios      SceneDelegate with sign-in session for ${authHosts.jo
 run("npm", ["run", "assets"], projectDir);
 run("npx", ["cap", "sync"], projectDir);
 mkdirSync(join(projectDir, ".github", "workflows"), { recursive: true });
-cpSync(join(templateRoot, ".github", "workflows", "mobile.yml"), join(projectDir, ".github", "workflows", "mobile.yml"));
+cpSync(join(here, "templates", "github", "mobile.yml"), join(projectDir, ".github", "workflows", "mobile.yml"));
 writeFileSync(join(projectDir, "README.md"), readme({ appName, appId, url, slug, associatedDomains, callbackScheme, pushIos, pushAndroid }));
 if (wantPush) {
   mkdirSync(join(projectDir, "app-snippet"), { recursive: true });
@@ -256,9 +270,9 @@ function scrape(html, baseUrl) {
   return { title: title && decodeEntities(title.trim()), themeColor, icon };
 }
 
-async function materializeIcon(source, baseUrl, assetsDir) {
+async function materializeIcon(source, assetsDir, fallbackSvg) {
   if (!source) {
-    cpSync(join(templateRoot, "assets", "logo.svg"), join(assetsDir, "logo.svg"));
+    writeFileSync(join(assetsDir, "logo.svg"), fallbackSvg);
     return join(assetsDir, "logo.svg");
   }
   let bytes;
@@ -274,6 +288,8 @@ async function materializeIcon(source, baseUrl, assetsDir) {
     ext = mimeToExt(res.headers.get("content-type") || "") || extname(new URL(source).pathname).slice(1) || "png";
     bytes = Buffer.from(await res.arrayBuffer());
   } else {
+    // A path is only read when the caller gave it; the platform and the page are third parties.
+    if (source !== (flags.icon || descriptor.icon)) fail(`Icon must be an http(s) or data: URL, got ${JSON.stringify(source)}`);
     const p = resolve(source);
     ext = extname(p).slice(1).toLowerCase();
     bytes = readFileSync(p);
@@ -319,7 +335,7 @@ function patchAndroid(dir, { appId, host, versionName, buildNumber, callbackSche
   }
   writeFileSync(manifestPath, manifest);
 
-  // MainActivity: load the incoming link in the WebView (proved on the emulator in the spike).
+  // MainActivity: load the incoming link in the WebView.
   const javaDir = join(app, "src", "main", "java", ...appId.split("."));
   const mainActivity = join(javaDir, "MainActivity.java");
   if (!existsSync(mainActivity)) fail(`cap add did not create ${mainActivity}`);
@@ -553,13 +569,19 @@ function readGoogleServices(appId) {
     : descriptor.googleServices ? readFileSync(resolve(String(descriptor.googleServices)), "utf8")
     : process.env.GOOGLE_SERVICES_JSON_B64 ? Buffer.from(process.env.GOOGLE_SERVICES_JSON_B64, "base64").toString("utf8")
     : null;
+  const fromEnv = !flags["google-services"] && !descriptor.googleServices;
   if (!raw) return null;
   let json;
   try { json = JSON.parse(raw); } catch { fail("The Firebase config (google-services.json) is not valid JSON"); }
   const packages = (json.client || []).map((c) => c.client_info?.android_client_info?.package_name);
-  // Gradle would fail later with "No matching client found"; say it here, with the fix.
-  if (!packages.includes(appId)) fail(`The Firebase config has no Android app for ${appId} (it has: ${packages.join(", ") || "none"}). Register the app in the Firebase project and download the config again.`);
-  return raw;
+  if (packages.includes(appId)) return raw;
+  const hint = `The Firebase config has no Android app for ${appId} (it has: ${packages.join(", ") || "none"}). Register the app in the Firebase project and download the config again.`;
+  // A file given for this app is a mistake (Gradle would fail later with "No matching client
+  // found"). The shared config of the pipeline covers only the apps registered so far, so an app
+  // missing from it is built without push on Android, as documented.
+  if (!fromEnv) fail(hint);
+  log(`push     android off: ${hint}`);
+  return null;
 }
 
 function offlinePage(name, color) {
@@ -579,7 +601,7 @@ function offlinePage(name, color) {
 </head>
 <body>
   <div>
-    <h1>Sem conexao</h1>
+    <h1>Sem conexão</h1>
     <p>${escapeHtml(name)} precisa de internet. Conecte-se e abra de novo.</p>
   </div>
 </body>
@@ -590,7 +612,7 @@ function offlinePage(name, color) {
 function readme({ appName, appId, url, slug, associatedDomains, callbackScheme, pushIos, pushAndroid }) {
   return `# ${appName} (mobile shell)
 
-Generated by \`mitra-mobile-shell-spike/generator\` from ${url}. Do not edit by hand: change
+Generated by \`mitra-mobile-shell/generator\` from ${url}. Do not edit by hand: change
 \`mitra-shell.json\` (or the flags) and generate again.
 
 - App id / bundle id: \`${appId}\`
@@ -604,7 +626,7 @@ Generated by \`mitra-mobile-shell-spike/generator\` from ${url}. Do not edit by 
   \`public/.well-known/assetlinks.json\` (from \`generator/wellknown.mjs\`).` : `by https callback on the app host (Universal Link),
   which needs the host to serve the apple-app-site-association file.`}
 - Push: iOS ${pushIos ? "on (aps-environment entitlement, AppDelegate hooks)" : "off"}, Android ${pushAndroid ? "on (Firebase config in android/app/google-services.json, not to be committed)" : "off"}.${pushIos || pushAndroid ? " The page uses Capacitor's PushNotifications plugin through the bridge, see \`app-snippet/push-example.html\`." : ""}
-- CI: \`.github/workflows/mobile.yml\` (same secrets as the spike: Android keystore, App Store Connect API key).
+- CI: \`.github/workflows/mobile.yml\` (secrets: Android keystore, App Store Connect API key).
 
 \`\`\`bash
 cd android && ./gradlew assembleDebug      # local APK
@@ -645,8 +667,9 @@ async function fetchText(u) {
   return res.text();
 }
 function clean(title) {
-  // "Name - tagline", "Name | tagline" and the dash variants: keep the name only.
-  return title.split(/\s+[-|\u2013\u2014:]\s+/)[0].trim();
+  // "Name - tagline", "Name | tagline" and the dash variants: keep the name only. Inner line
+  // breaks of a page title collapse to a space: the name ends up in single-line files and outputs.
+  return title.split(/\s+[-|\u2013\u2014:]\s+/)[0].replace(/\s+/g, " ").trim();
 }
 function slugify(s) {
   return s.normalize("NFD").replace(/[̀-ͯ]/g, "").toLowerCase().replace(/[^a-z0-9]+/g, "").slice(0, 40) || "app";
@@ -657,9 +680,42 @@ function packageSegment(seg) {
   if (javaReserved.has(seg)) seg = `${seg}app`;
   return seg;
 }
+function isVersionName(v) { return /^\d+(\.\d+){0,2}$/.test(v); }
+function isPlainHost(h) { return /^[a-z0-9.-]+(:\d+)?$/.test(h); }
 function validateAppId(id) {
   const parts = id.split(".");
   if (parts.length < 2 || parts.some((p) => !/^[a-zA-Z][a-zA-Z0-9_]*$/.test(p))) fail(`Invalid app id for Android/iOS: ${id}`);
+}
+// A color from the caller is a mistake to report; one from the platform or the page belongs to a
+// third party and must not break the build, so it is skipped.
+function resolveThemeColor(own, external) {
+  if (own) {
+    if (!HEX_COLOR.test(own)) throw new Error(`Theme color must be a hex color like #0f172a or #abc, got ${JSON.stringify(own)}`);
+    return own;
+  }
+  for (const color of external.filter(Boolean)) {
+    if (HEX_COLOR.test(color)) return color;
+    log(`theme    ignoring ${JSON.stringify(color)} (not a hex color)`);
+  }
+  return DEFAULT_THEME_COLOR;
+}
+// Only A-Z and 0-9 come out of here, so the result goes into the SVG without escaping.
+function initials(name, slug = "") {
+  const words = name.normalize("NFD").replace(/[\u0300-\u036f]/g, "").toUpperCase().split(/[^A-Z0-9]+/).filter(Boolean);
+  const letters = words.length >= 2 ? words[0][0] + words[1][0] : (words[0] || "").slice(0, 2);
+  return letters || slug.toUpperCase().replace(/[^A-Z0-9]/g, "").slice(0, 2) || "A";
+}
+function initialsLogoSvg(letters, color) {
+  // The baseline is computed from the cap height of Helvetica and Arial (0.716 em) because
+  // librsvg, which rasterizes the file, ignores dominant-baseline. The size keeps the widest pair
+  // ("WM") inside the circle Android guarantees to show of an adaptive icon (66% of the side).
+  const size = 340;
+  const baseline = Math.round(512 + 0.358 * size);
+  return `<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <rect width="1024" height="1024" fill="${color}"/>
+  <text x="512" y="${baseline}" font-family="Helvetica, Arial, sans-serif" font-size="${size}" font-weight="700" fill="${isDark(color) ? "#ffffff" : "#0f172a"}" text-anchor="middle">${letters}</text>
+</svg>
+`;
 }
 function isDark(hex) {
   const m = hex.replace("#", "");
@@ -682,10 +738,45 @@ function findApk(dir) {
   if (!apk) fail(`No APK under ${dir}`);
   return join(dir, apk);
 }
+// GITHUB_OUTPUT is one "key=value" per line: a line break inside a value would let it define
+// other outputs of the step.
+function githubOutputLines(obj) {
+  return Object.entries(obj).filter(([, v]) => v !== undefined && !Array.isArray(v)).map(([k, v]) => {
+    if (/[\r\n]/.test(String(v))) throw new Error(`Output ${k} has a line break: ${JSON.stringify(v)}`);
+    return `${k.replace(/[A-Z]/g, (c) => "_" + c.toLowerCase())}=${v}\n`;
+  }).join("");
+}
 function githubOutputs(obj) {
   if (!process.env.GITHUB_OUTPUT) return;
-  writeFileSync(process.env.GITHUB_OUTPUT, Object.entries(obj).filter(([, v]) => v !== undefined && !Array.isArray(v))
-    .map(([k, v]) => `${k.replace(/[A-Z]/g, (c) => "_" + c.toLowerCase())}=${v}\n`).join(""), { flag: "a" });
+  let lines;
+  try { lines = githubOutputLines(obj); } catch (e) { fail(e.message); }
+  writeFileSync(process.env.GITHUB_OUTPUT, lines, { flag: "a" });
+}
+function selftest() {
+  const assert = (cond, msg) => { if (!cond) fail(`selftest: ${msg}`); };
+  const throws = (fn) => { try { fn(); return false; } catch { return true; } };
+  for (const [name, expected] of [["Minha Casa", "MC"], ["ROUTER", "RO"], ["x", "X"], ["Ação Já", "AJ"],
+    ["one two three", "OT"], ["  Café-da manhã ", "CD"], ["3M Company", "3C"], ["<b>&\"", "B"]]) {
+    assert(initials(name) === expected, `initials(${JSON.stringify(name)}) is ${initials(name)}, expected ${expected}`);
+  }
+  assert(initials("!!!", "app") === "AP", "initials falls back to the slug");
+  assert(initials("!!!") === "A", "initials falls back to A");
+  const svg = initialsLogoSvg("MC", "#ffffff");
+  assert(svg.includes(">MC</text>") && svg.includes('fill="#ffffff"') && svg.includes('fill="#0f172a"'), "light logo has dark letters");
+  assert(initialsLogoSvg("MC", "#000").includes('fill="#ffffff"'), "dark logo has light letters");
+  assert(resolveThemeColor("#ABC", ["#111111"]) === "#ABC", "own color wins");
+  assert(throws(() => resolveThemeColor("red", [])), "own color must be hex");
+  assert(throws(() => resolveThemeColor("#12345", [])), "5 hex digits are refused");
+  assert(throws(() => resolveThemeColor("#fff' ; touch x '", [])), "shell text in the color is refused");
+  assert(resolveThemeColor(undefined, [undefined, "rgb(1,2,3)", "#0a0b0c"]) === "#0a0b0c", "invalid external color is skipped");
+  assert(resolveThemeColor(undefined, ["red", undefined]) === DEFAULT_THEME_COLOR, "no valid color -> default");
+  assert(githubOutputLines({ appName: "A B", skip: undefined, list: ["x"], n: 3 }) === "app_name=A B\nn=3\n", "githubOutputLines");
+  assert(throws(() => githubOutputLines({ appName: "A\nevil=1" })), "line feed in an output is refused");
+  assert(throws(() => githubOutputLines({ appName: "A\rB" })), "carriage return in an output is refused");
+  assert(clean("My\n  App | tagline") === "My App", "clean collapses line breaks");
+  assert(isVersionName("1") && isVersionName("1.2.3") && !isVersionName("1.0${x}") && !isVersionName('1.0"') && !isVersionName("1.2.3.4"), "isVersionName");
+  assert(isPlainHost("a-1.example.com") && isPlainHost("127.0.0.1:8099") && !isPlainHost('a"b.com') && !isPlainHost("a b"), "isPlainHost");
+  console.log("[generate] selftest ok");
 }
 function log(msg) { console.log(`[generate] ${msg}`); }
 function fail(msg) { console.error(`[generate] ERROR: ${msg}`); process.exit(1); }

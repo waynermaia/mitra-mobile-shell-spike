@@ -1,19 +1,18 @@
 #!/usr/bin/env node
-// POC: the app association files a published host must serve for the shell to claim its links
+// The app association files a published host must serve for the shell to claim its links
 // and its sign-in callback, written where the platform edge reads them.
 //
-//   node generator/wellknown.mjs --project out/<slug> --team P6W44YNWTY \
-//        [--keystore .secrets/upload.jks --storepass ... [--alias upload]] \
+//   node generator/wellknown.mjs --project out/<slug> --team <Apple Team ID> \
+//        [--keystore .secrets/upload.jks [--storepass-env KEYSTORE_PASSWORD] [--alias upload]] \
 //        [--play-sha256 "CF:CD:..."] [--bucket <deploys bucket> --prefix alpha/ [--key-host <host>]]
 //
 // Reads mitra-shell.json from the generated project (app id, host). Writes under
 // <project>/wellknown/: apple-app-site-association and assetlinks.json, and prints the two
 // aws s3 cp commands when --bucket is given (printed, never run: writing the deploys bucket of an
 // environment is an operator step). The edge serves /.well-known/<file> of a host from the stable
-// prefix of the host, {deploys_path_prefix}hosts/{host}/.well-known/<file> (mitra-terraform#1101),
-// the same place as the stable index.html. On a host whose KVS key still lives under a legacy host
-// (alpha: .infusion-ai.cloud read through .infusion.cloud) the prefix is the legacy host; --key-host
-// names it. Nothing is written to the KeyValueStore, which is leaving the routing (mitra-terraform#1073).
+// prefix of the host, {deploys_path_prefix}hosts/{host}/.well-known/<file>, the same place as the
+// stable index.html. When the edge reads a host through the prefix of another host, --key-host
+// names that one. Nothing is written to the KeyValueStore.
 //
 // The Android fingerprints are the certificates that sign what reaches the device: the upload
 // key when the APK is installed by adb, the Play App Signing key (Play Console > App signing >
@@ -46,7 +45,8 @@ const appId = descriptor.appId;
 const host = new URL(descriptor.url).host.toLowerCase();
 
 const fingerprints = [];
-if (flags.keystore) fingerprints.push(keystoreSha256(flags.keystore, flags.storepass, flags.alias || "upload"));
+if (flags.storepass) fail("--storepass is not accepted: put the password in an environment variable and name it with --storepass-env");
+if (flags.keystore) fingerprints.push(keystoreSha256(flags.keystore, String(flags["storepass-env"] || "KEYSTORE_PASSWORD"), flags.alias || "upload"));
 for (const fp of String(flags["play-sha256"] || "").split(",").map((s) => s.trim()).filter(Boolean)) fingerprints.push(normalizeFingerprint(fp));
 if (fingerprints.length === 0) fail("Give --keystore (upload key) and/or --play-sha256 (Play App Signing key); Android needs at least one certificate fingerprint");
 
@@ -71,7 +71,7 @@ if (flags.bucket) {
   }
   console.log(`\ncurl -s https://${host}/.well-known/apple-app-site-association   # expect the AASA JSON, not the index.html`);
   console.log(`curl -s https://${host}/.well-known/assetlinks.json`);
-  if (keyHost === host) console.log(`\n# 404 after the copy: the host is served through a legacy key; repeat with --key-host <legacy host> (alpha: ${host.replace(/\.infusion-ai\.cloud$/, ".infusion.cloud")}).`);
+  if (keyHost === host) console.log("\n# 404 after the copy: the edge reads this host through the prefix of another host; repeat with --key-host <that host>.");
 }
 
 // ---------- pure parts ----------
@@ -94,9 +94,10 @@ export function normalizeFingerprint(fp) {
 }
 
 // ---------- helpers ----------
-function keystoreSha256(keystore, storepass, alias) {
-  if (!storepass) fail("--keystore needs --storepass");
-  const out = execFileSync("keytool", ["-list", "-v", "-keystore", resolve(keystore), "-storepass", storepass, "-alias", alias], { encoding: "utf8" });
+// keytool reads the password from the named variable, so it never shows in the process list.
+function keystoreSha256(keystore, passwordEnv, alias) {
+  if (!process.env[passwordEnv]) fail(`--keystore needs the keystore password in ${passwordEnv}`);
+  const out = execFileSync("keytool", ["-list", "-v", "-keystore", resolve(keystore), "-storepass:env", passwordEnv, "-alias", alias], { encoding: "utf8" });
   const m = out.match(/SHA256:\s*([0-9A-F:]{95})/);
   if (!m) fail(`keytool did not print a SHA256 fingerprint for alias ${alias}`);
   return m[1];
@@ -106,7 +107,7 @@ function selftest() {
   if (e.ios[0] !== "T1.cloud.infusion.x" || e.android[0].package !== "cloud.infusion.x") throw new Error("appAssociation");
   if (aasa(e.ios).webcredentials.apps[0] !== "T1.cloud.infusion.x") throw new Error("aasa");
   if (assetlinks(e.android)[0].target.sha256_cert_fingerprints[0] !== "AA:BB") throw new Error("assetlinks");
-  if (normalizeFingerprint("a4 5e 81 d8 38 6c dc 9f 20 f6 8d 45 70 25 1a f4 48 97 a3 f6 f9 b5 68 a0 ae 74 65 a6 80 06 2f e0") !== "A4:5E:81:D8:38:6C:DC:9F:20:F6:8D:45:70:25:1A:F4:48:97:A3:F6:F9:B5:68:A0:AE:74:65:A6:80:06:2F:E0") throw new Error("normalize");
+  if (normalizeFingerprint("00 01 02 03 04 05 06 07 08 09 0a 0b 0c 0d 0e 0f 10 11 12 13 14 15 16 17 18 19 1a 1b 1c 1d 1e 1f") !== "00:01:02:03:04:05:06:07:08:09:0A:0B:0C:0D:0E:0F:10:11:12:13:14:15:16:17:18:19:1A:1B:1C:1D:1E:1F") throw new Error("normalize");
   console.log("[wellknown] selftest ok");
 }
 function log(msg) { console.log(`[wellknown] ${msg}`); }

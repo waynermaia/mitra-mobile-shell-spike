@@ -13,11 +13,14 @@ on:
       app:
         description: "Platform app UUID used for the identity (name, bundle id)"
         type: string
-        default: "a97a993f-9181-4865-b309-5797c3b9ca1e"
+        required: true
       api:
         description: "Platform API base URL"
         type: string
         default: "https://beta.mitralab.io"
+
+permissions:
+  contents: read
 
 jobs:
   ios-push:
@@ -26,14 +29,17 @@ jobs:
       run:
         shell: bash
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803  # v6
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020  # v7
         with:
           node-version: 22
           cache: npm
       - name: Generate the shell with push
         id: gen
-        run: node generator/generate.mjs --app "${{ inputs.app }}" --api "${{ inputs.api }}" --push --verbose
+        env:
+          INPUT_APP: ${{ inputs.app }}
+          INPUT_API: ${{ inputs.api }}
+        run: node generator/generate.mjs --app "$INPUT_APP" --api "$INPUT_API" --push --verbose
       - name: Swap the published page for the local test page
         working-directory: ${{ steps.gen.outputs.project_dir }}
         run: |
@@ -83,9 +89,9 @@ jobs:
           xcrun simctl boot "$UDID"
           xcrun simctl bootstatus "$UDID" -b | tail -2
           xcrun simctl install "$UDID" "$RUNNER_TEMP/dd/Build/Products/Debug-iphonesimulator/App.app"
-          # The permission dialog cannot be tapped from a script; this writes the same answer.
           echo "simulator $UDID, app installed"
-          # applesimutils is the simulator tool of the Detox project (wix); the runner is thrown away after the job.
+          # The permission dialog cannot be tapped from a script; applesimutils, the simulator tool
+          # of the Detox project (wix), writes the same answer. The runner is thrown away after the job.
           (brew tap wix/brew && brew trust wix/brew && HOMEBREW_NO_AUTO_UPDATE=1 brew install applesimutils) 2>&1 | tail -5
           applesimutils --byId "$UDID" --bundle "$BUNDLE" --setPermissions notifications=YES 2>&1 | tail -5
           mkdir -p "$RUNNER_TEMP/evidence"
@@ -95,7 +101,7 @@ jobs:
           for i in $(seq 1 60); do grep -a -q "PUSHTEST register-called" "$RUNNER_TEMP/evidence/app.log" && break; sleep 3; done
           sleep 5
           cat > "$RUNNER_TEMP/payload.json" <<'EOF'
-          { "aps": { "alert": { "title": "Bolo pronto", "body": "Seu pedido saiu do forno" }, "sound": "default" }, "pedido": "42" }
+          { "aps": { "alert": { "title": "Push smoke test", "body": "Delivered by simctl push" }, "sound": "default" }, "order": "42" }
           EOF
           xcrun simctl push "$UDID" "$BUNDLE" "$RUNNER_TEMP/payload.json"
           for i in $(seq 1 10); do grep -a -q "PUSHTEST received" "$RUNNER_TEMP/evidence/app.log" && break; sleep 2; done
@@ -106,7 +112,7 @@ jobs:
           echo "----- page log -----"
           grep -a "PUSHTEST" "$RUNNER_TEMP/evidence/app.log" || true
           grep -a -q "PUSHTEST received" "$RUNNER_TEMP/evidence/app.log" || { echo "::error::The page did not receive the notification"; tail -60 "$RUNNER_TEMP/evidence/app.log"; exit 1; }
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7
         if: always()
         with:
           name: push-smoke-ios

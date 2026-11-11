@@ -1,7 +1,0 @@
-<?xml version='1.0' encoding='utf-8'?>
-<resources>
-    <string name="app_name">Bolo Mobile Spike</string>
-    <string name="title_activity_main">Bolo Mobile Spike</string>
-    <string name="package_name">cloud.infusion.bolomobilespike</string>
-    <string name="custom_url_scheme">cloud.infusion.bolomobilespike</string>
-</resources>

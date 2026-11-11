@@ -1,0 +1,57 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+# The branch rule requires checks named exactly "build" and "test": keep the job ids and do not
+# give the jobs a display name.
+jobs:
+  test:
+    runs-on:
+      group: mitra-ci
+      labels: mitra-ci
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803  # v6
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020  # v7
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm test
+
+  build:
+    runs-on:
+      group: mitra-ci
+      labels: mitra-ci
+    env:
+      FIXTURE_URL: http://127.0.0.1:8099
+      FIXTURE_APP_ID: cloud.mitra.cifixture
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803  # v6
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020  # v7
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      # --url mode reads only the published page, so a local page stands in for it and the run
+      # needs neither the platform API nor a secret. The page has no icon, which also exercises
+      # the icon drawn from the initials of the name.
+      - name: Serve the fixture page
+        run: |
+          node -e 'require("http").createServer((req, res) => res.end("<title>CI Fixture</title>")).listen(8099, "127.0.0.1")' &
+          curl -fsS --retry 10 --retry-connrefused --retry-delay 1 "$FIXTURE_URL" > /dev/null
+      - name: Generate a shell (Android only, no Gradle build)
+        run: node generator/generate.mjs --url "$FIXTURE_URL" --name "CI Fixture" --app-id "$FIXTURE_APP_ID" --no-ios --out "$RUNNER_TEMP/out"
+      - name: Check the generated project
+        working-directory: ${{ runner.temp }}/out/cifixture
+        run: |
+          node -e 'process.exit(require("./capacitor.config.json").appId === process.env.FIXTURE_APP_ID ? 0 : 1)'
+          test -f android/app/build.gradle
+          test -f .github/workflows/mobile.yml
+          test -f .gitignore
+          grep -q '>CF</text>' assets/logo.svg

@@ -1,18 +1,14 @@
 {
-  "name": "mitra-mobile-shell-spike",
+  "name": "mitra-mobile-shell",
   "version": "0.1.0",
-  "description": "",
-  "main": "index.js",
+  "description": "Capacitor shell generator and store pipeline for Mitra platform apps",
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1",
-    "sync": "cap sync",
-    "assets": "capacitor-assets generate --iconBackgroundColor '#0f172a' --splashBackgroundColor '#0f172a'"
+    "test": "for f in generator/*.mjs; do node --check \"$f\" || exit 1; done && node generator/asc.mjs selftest && node generator/play.mjs selftest && node generator/wellknown.mjs --selftest && node generator/generate.mjs --selftest"
   },
   "keywords": [],
   "author": "",
-  "license": "ISC",
   "type": "commonjs",
-  "private": "true",
+  "private": true,
   "dependencies": {
     "@capacitor/android": "^8.6.0",
     "@capacitor/app": "^8.1.2",
@@ -27,8 +23,5 @@
     "@capacitor/share": "^8.0.3",
     "@capacitor/splash-screen": "^8.0.2",
     "@capacitor/status-bar": "^8.0.4"
-  },
-  "devDependencies": {
-    "typescript": "^7.0.2"
   }
 }
