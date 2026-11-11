@@ -32,9 +32,7 @@ permissions:
 
 jobs:
   tools:
-    runs-on:
-      group: mitra-delivery
-      labels: mitra-delivery
+    runs-on: ubuntu-latest
     environment: stores
     env:
       BUNDLE_ID: ${{ inputs.bundle_id }}

@@ -91,9 +91,7 @@ jobs:
   # invalidate it.
   version:
     name: Build number
-    runs-on:
-      group: mitra-delivery
-      labels: mitra-delivery
+    runs-on: ubuntu-latest
     environment: stores
     outputs:
       number: ${{ steps.build.outputs.number }}
@@ -155,9 +153,7 @@ jobs:
   android:
     name: Android (signed AAB and APK, Play upload)
     needs: version
-    runs-on:
-      group: mitra-delivery
-      labels: mitra-delivery
+    runs-on: ubuntu-latest
     environment: stores
     defaults:
       run:
